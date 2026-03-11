@@ -1,0 +1,12 @@
+PySide6
+pandas
+numpy
+yfinance
+matplotlib
+PyPortfolioOpt
+tensorflow
+scipy
+SQLAlchemy
+db-sqlite3
+lxml
+scikit-learn
