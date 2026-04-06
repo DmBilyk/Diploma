@@ -24,6 +24,7 @@ Usage
 from __future__ import annotations
 
 import logging
+import warnings
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -80,6 +81,7 @@ class BacktestResult:
     spec: PortfolioSpec
     metrics: BacktestMetrics
     portfolio_values: pd.Series  # indexed by datetime
+    benchmark: Optional["BacktestResult"] = None  # per-portfolio EW benchmark
 
 
 @dataclass
@@ -100,7 +102,7 @@ class BacktestReport:
 _MIN_SERIES_LENGTH = 4          # minimum observations to compute metrics
 _ANNUALISATION_FACTOR = 52      # weekly data → annual
 _EPSILON = 1e-12                # guard against division by zero
-_WEIGHT_SUM_TOLERANCE = 0.05    # acceptable deviation of Σw from 1.0
+_WEIGHT_SUM_TOLERANCE = 0.01    # acceptable deviation of Σw from 1.0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -132,15 +134,19 @@ class BacktestEngine:
         initial_capital: float = 100_000.0,
         risk_free_rate: float = 0.02,
         repo: Optional[PortfolioRepository] = None,
+        rebalance_every: Optional[int] = None,
     ) -> None:
         if initial_capital <= 0:
             raise ValueError("initial_capital must be positive")
+        if rebalance_every is not None and rebalance_every < 1:
+            raise ValueError("rebalance_every must be a positive integer")
 
         self._start = start_date
         self._end = end_date
         self._capital = float(initial_capital)
         self._rf = float(risk_free_rate)
         self._repo = repo
+        self._rebalance_every = rebalance_every
 
     # ------------------------------------------------------------------
     #  Public API
@@ -150,7 +156,8 @@ class BacktestEngine:
         """Execute the backtest for every portfolio in *portfolios*.
 
         Returns a :class:`BacktestReport` containing per-portfolio metrics,
-        value series, and an equal-weight benchmark.
+        value series, per-portfolio equal-weight benchmarks, and a
+        (deprecated) global equal-weight benchmark.
         """
         if not portfolios:
             raise ValueError("At least one PortfolioSpec is required")
@@ -172,10 +179,32 @@ class BacktestEngine:
         results: List[BacktestResult] = []
         for spec in portfolios:
             self._validate_spec(spec, prices.columns)
-            values = self._simulate(spec.weights, prices, self._capital)
+            values = self._simulate(
+                spec.weights, prices, self._capital, self._rebalance_every,
+            )
             metrics = self._compute_metrics(values)
-            results.append(BacktestResult(spec=spec, metrics=metrics, portfolio_values=values))
 
+            # Per-portfolio equal-weight benchmark (same tickers as the portfolio)
+            p_tickers = list(spec.weights.keys())
+            eq_w = {t: 1.0 / len(p_tickers) for t in p_tickers}
+            bench_vals = self._simulate(
+                eq_w, prices, self._capital, self._rebalance_every,
+            )
+            bench_metrics = self._compute_metrics(bench_vals)
+            bench_result = BacktestResult(
+                spec=PortfolioSpec(name=f"{spec.name} EW Benchmark", weights=eq_w),
+                metrics=bench_metrics,
+                portfolio_values=bench_vals,
+            )
+
+            results.append(BacktestResult(
+                spec=spec,
+                metrics=metrics,
+                portfolio_values=values,
+                benchmark=bench_result,
+            ))
+
+        # Deprecated global benchmark — kept for backward compatibility
         benchmark = self._build_benchmark(prices)
 
         return BacktestReport(
@@ -210,6 +239,17 @@ class BacktestEngine:
         df.index = pd.to_datetime(df.index)
         df = df.sort_index()
 
+        # Forward-fill NaN gaps so one missing price does not
+        # contaminate the entire value series downstream.
+        n_nan_before = int(df.isna().sum().sum())
+        if n_nan_before > 0:
+            df = df.ffill()
+            n_nan_after = int(df.isna().sum().sum())
+            logger.warning(
+                "_load_prices: forward-filled %d NaN cells (%d remain)",
+                n_nan_before - n_nan_after, n_nan_after,
+            )
+
         return df
 
     # ------------------------------------------------------------------
@@ -221,19 +261,26 @@ class BacktestEngine:
         weights: Dict[str, float],
         prices: pd.DataFrame,
         initial_capital: float,
+        rebalance_every: Optional[int] = None,
     ) -> pd.Series:
         """Convert weights + price matrix → portfolio value series.
 
-        The simulation buys fractional shares at the first available price
-        and holds them for the entire period (buy-and-hold).
+        Parameters
+        ----------
+        rebalance_every : int | None
+            If *None* → buy-and-hold (original behaviour).
+            If an integer N → rebalance to target weights every N rows.
+            Since data is weekly, N=4 ≈ monthly, N=13 ≈ quarterly.
         """
         tickers = list(weights.keys())
         w = np.array([weights[t] for t in tickers], dtype=np.float64)
 
         subset = prices[tickers].copy()
+        price_matrix = subset.values.astype(np.float64)  # (T, n_assets)
+        n_rows = price_matrix.shape[0]
 
-        # Replace any remaining NaN / zero first-row prices defensively.
-        first_prices = subset.iloc[0].values.astype(np.float64)
+        # Validate first-row prices.
+        first_prices = price_matrix[0]
         safe_first = np.where(
             (first_prices > _EPSILON) & np.isfinite(first_prices),
             first_prices,
@@ -249,12 +296,44 @@ class BacktestEngine:
                 "They may not have data in the selected date range."
             )
 
-        # Capital allocated to each asset → number of shares.
-        capital_per_asset = w * initial_capital  # normalise later; use weight fractions
-        shares = capital_per_asset / safe_first
+        # ── Buy-and-hold (original behaviour) ────────────────────────
+        if rebalance_every is None:
+            capital_per_asset = w * initial_capital
+            shares = capital_per_asset / safe_first
+            values = (price_matrix * shares).sum(axis=1)
+            return pd.Series(values, index=subset.index, name="portfolio_value")
 
-        # Portfolio value at each timestamp.
-        values = (subset.values * shares).sum(axis=1)
+        # ── Periodic rebalancing ─────────────────────────────────────
+        values = np.empty(n_rows, dtype=np.float64)
+        current_value = initial_capital
+
+        # Initial share purchase
+        shares = (current_value * w) / safe_first
+        values[0] = current_value
+
+        for i in range(1, n_rows):
+            current_prices = price_matrix[i]
+            current_value = float((shares * current_prices).sum())
+            values[i] = current_value
+
+            # Rebalance at every N-th row (skip if prices are invalid)
+            if i % rebalance_every == 0:
+                safe_prices = np.where(
+                    (current_prices > _EPSILON) & np.isfinite(current_prices),
+                    current_prices,
+                    np.nan,
+                )
+                if np.isnan(safe_prices).any():
+                    bad = [t for t, p in zip(tickers, safe_prices) if np.isnan(p)]
+                    logger.warning(
+                        "Rebalance skipped at row %d: invalid prices for %s. "
+                        "Portfolio will drift from target weights until next "
+                        "successful rebalance.",
+                        i, bad,
+                    )
+                else:
+                    shares = (current_value * w) / safe_prices
+
         return pd.Series(values, index=subset.index, name="portfolio_value")
 
     # ------------------------------------------------------------------
@@ -271,32 +350,40 @@ class BacktestEngine:
 
         start_val = float(values.iloc[0])
         end_val = float(values.iloc[-1])
-
         total_ret = (end_val / start_val) - 1.0
 
-        years = (values.index[-1] - values.index[0]).days / 365.25
-        years = max(years, _EPSILON)  # guard
+        # 1. ДИНАМІЧНИЙ ФАКТОР АНУАЛІЗАЦІЇ (Рятує від змішаних дат у БД)
+        days_total = (values.index[-1] - values.index[0]).days
+        years = max(days_total / 365.25, _EPSILON)
+        ann_factor = len(values) / years  # Самостійно вираховує, скільки торгів було в році
+
         cagr_val = (end_val / start_val) ** (1.0 / years) - 1.0
-
         returns = values.pct_change().dropna()
-        ann_vol = float(returns.std() * np.sqrt(_ANNUALISATION_FACTOR))
 
-        # Weekly risk-free rate for excess-return calculations.
-        rf_period = (1.0 + self._rf) ** (1.0 / _ANNUALISATION_FACTOR) - 1.0
+        # 2. Використовуємо ann_factor замість жорстких 52
+        ann_vol = float(returns.std() * np.sqrt(ann_factor))
+
+        rf_period = (1.0 + self._rf) ** (1.0 / ann_factor) - 1.0
         excess = returns - rf_period
 
         sharpe = (
-            float(excess.mean() / (returns.std() + _EPSILON))
-            * np.sqrt(_ANNUALISATION_FACTOR)
+                float(excess.mean() / (excess.std() + _EPSILON))
+                * np.sqrt(ann_factor)
         )
 
-        # Sortino: penalise only downside deviation.
+        # Sortino
         downside = excess[excess < 0]
-        downside_std = float(downside.std()) if len(downside) > 1 else _EPSILON
-        sortino = (
-            float(excess.mean() / (downside_std + _EPSILON))
-            * np.sqrt(_ANNUALISATION_FACTOR)
-        )
+        if len(downside) < 2:
+            sortino = float("nan")
+        else:
+            downside_std = float(downside.std())
+            if downside_std < _EPSILON:
+                sortino = float("nan")
+            else:
+                sortino = (
+                        float(excess.mean() / downside_std)
+                        * np.sqrt(ann_factor)
+                )
 
         drawdown = float(((values / values.cummax()) - 1.0).min())
 
@@ -316,11 +403,22 @@ class BacktestEngine:
     # ------------------------------------------------------------------
 
     def _build_benchmark(self, prices: pd.DataFrame) -> BacktestResult:
-        """Equal-weight benchmark across all available tickers."""
+        """Equal-weight benchmark across all available tickers.
+
+        .. deprecated::
+            This global benchmark uses *all* tickers from *all* portfolios.
+            Prefer the per-portfolio ``BacktestResult.benchmark`` instead.
+        """
+        warnings.warn(
+            "BacktestReport.benchmark (global EW benchmark) is deprecated. "
+            "Use BacktestResult.benchmark (per-portfolio EW benchmark) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         n = prices.shape[1]
         eq_weights = {t: 1.0 / n for t in prices.columns}
-        spec = PortfolioSpec(name="Equal-Weight Benchmark", weights=eq_weights)
-        values = self._simulate(eq_weights, prices, self._capital)
+        spec = PortfolioSpec(name="Equal-Weight Benchmark (deprecated)", weights=eq_weights)
+        values = self._simulate(eq_weights, prices, self._capital, self._rebalance_every)
         metrics = self._compute_metrics(values)
         return BacktestResult(spec=spec, metrics=metrics, portfolio_values=values)
 

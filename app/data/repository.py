@@ -1,3 +1,4 @@
+import datetime
 import pandas as pd
 from sqlalchemy import select, delete, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
@@ -98,6 +99,13 @@ class PortfolioRepository:
         pivot_df.index = pd.to_datetime(pivot_df.index)
         pivot_df = pivot_df.ffill()
         return pivot_df
+
+    def get_latest_quote_date(self) -> datetime.date | None:
+        """Отримує найсвіжішу дату котирувань у базі."""
+        with self.Session() as session:
+            stmt = select(Quote.date).order_by(Quote.date.desc()).limit(1)
+            result = session.execute(stmt).scalar_one_or_none()
+            return result
 
     # --- ДОДАНИЙ МЕТОД ---
     def get_quotes(self, ticker: str) -> pd.DataFrame:

@@ -1,229 +1,411 @@
-import pandas as pd
-from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                               QPushButton, QStackedWidget, QLabel, QFrame,
-                               QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView)
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QPalette
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
+from __future__ import annotations
+"""
+app/ui/main_window.py — Головне вікно програми InvestPortfolio Optimizer.
+
+Структура:
+- Фіксований темний sidebar зі навігаційними кнопками
+- QStackedWidget:
+    0 — Market Data Explorer (таблиця тікерів + StockChartWidget)
+    1 — Optimization  (плейсхолдер)
+    2 — Backtesting   (плейсхолдер)
+"""
+
+import logging
+
+
+
+from PySide6.QtCore import Qt, QThread, Signal                        # pylint: disable=no-name-in-module
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QFrame,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+    QMessageBox,
+)
+
 from app.data.repository import PortfolioRepository
+from app.ui.widget.stock_chart_widget import StockChartWidget
+from app.ui.widget.optimizing_spinner import OptimizingSpinner
+from app.ui.widget.backtest_widget import BacktestWidget
+from app.core.core import PortfolioCore
+from app.ui.workers import DataSyncWorker
 
+logger = logging.getLogger(__name__)
 
-class MplCanvas(FigureCanvas):
-    """Полотно для малювання графіків Matplotlib"""
+_ACCENT = "#1ABC9C"
 
-    def __init__(self, parent=None, width=5, height=4, dpi=100):
-        fig = Figure(figsize=(width, height), dpi=dpi)
-        self.axes = fig.add_subplot(111)
-
-        # Встановлюємо білий фон для самого графіка, щоб він був контрастним
-        # у будь-якій темі (інакше чорні літери на темному фоні не видно)
-        fig.patch.set_facecolor('white')
-
-        super().__init__(fig)
-
+# ═══════════════════════════════════════════════════════════════════════════════
+# Головне вікно
+# ═══════════════════════════════════════════════════════════════════════════════
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    """
+    Головне вікно програми.
+
+    Layout: [Sidebar 220px] | [QStackedWidget — решта ширини]
+    """
+
+    _SIDEBAR_W = 220
+    _WINDOW_SIZE = (1280, 800)
+
+    def __init__(self) -> None:
         super().__init__()
-        self.repo = PortfolioRepository()
-        self.setWindowTitle("InvestPortfolio Optimizer (Diploma)")
-        self.resize(1280, 800)
 
-        # Головний макет
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        self.main_layout = QHBoxLayout(central_widget)
-        self.main_layout.setContentsMargins(0, 0, 0, 0)
-        self.main_layout.setSpacing(0)
+        self.core = PortfolioCore()
+        self._repo = self.core.repo
 
-        # Створюємо Sidebar та Pages
-        self.sidebar = self.create_sidebar()
-        self.main_layout.addWidget(self.sidebar)
+        self.setWindowTitle("InvestPortfolio Optimizer")
+        self.resize(*self._WINDOW_SIZE)
+        self._apply_global_style()
+        self._build_layout()
 
-        self.pages = QStackedWidget()
-        self.main_layout.addWidget(self.pages)
+    # ─────────────────────────────────────────────────────────────────────────
+    # Глобальні стилі
+    # ─────────────────────────────────────────────────────────────────────────
 
-        # Створення сторінок
-        self.init_data_page()
-
-        # Додавання сторінок у стек
-        self.pages.addWidget(self.page_data)
-        self.pages.addWidget(self.create_placeholder_page("Optimization Algorithms"))
-        self.pages.addWidget(self.create_placeholder_page("Backtesting Results"))
-
-    def create_sidebar(self):
-        sidebar = QFrame()
-        # Sidebar залишаємо темним завжди - це акцент дизайну
-        sidebar.setStyleSheet("""
-            QFrame {
-                background-color: #2C3E50;
+    def _apply_global_style(self) -> None:
+        """
+        Мінімальний загальний stylesheet.
+        Не перебиває системну палітру Qt — лише точкові уточнення.
+        """
+        self.setStyleSheet(f"""
+            QTableWidget {{
+                border: none;
+                outline: none;
+                font-size: 12px;
+            }}
+            QTableWidget::item {{
+                padding: 6px 10px;
+                border-bottom: 1px solid rgba(128,128,128,0.15);
+            }}
+            QTableWidget::item:selected {{
+                background-color: {_ACCENT};
                 color: white;
-                border: none;
-            }
-            QPushButton {
-                background-color: transparent;
-                color: #BDC3C7;
-                text-align: left;
-                padding: 15px;
-                border: none;
-                font-size: 16px;
-            }
-            QPushButton:hover {
+            }}
+            QHeaderView::section {{
                 background-color: #34495E;
-                color: white;
-            }
-            QPushButton:checked {
-                background-color: #1ABC9C;
-                color: white;
+                color: #BDC3C7;
+                padding: 7px 10px;
+                border: none;
+                font-size: 11px;
                 font-weight: bold;
-            }
-            QLabel {
-                color: white;
-                font-weight: bold;
-                font-size: 20px;
-                padding: 20px;
-            }
+                letter-spacing: 0.5px;
+                text-transform: uppercase;
+            }}
+            QScrollBar:vertical {{
+                border: none;
+                width: 6px;
+                margin: 0;
+            }}
+            QScrollBar::handle:vertical {{
+                background: rgba(128,128,128,0.4);
+                border-radius: 3px;
+                min-height: 20px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
         """)
-        sidebar.setFixedWidth(250)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Побудова макету
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _build_layout(self) -> None:
+        root = QWidget()
+        self.setCentralWidget(root)
+
+        layout = QHBoxLayout(root)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        layout.addWidget(self._build_sidebar())
+
+        self._pages = QStackedWidget()
+        self._pages.addWidget(self._build_market_page())
+        self._pages.addWidget(self._build_optimization_page())
+        self._pages.addWidget(BacktestWidget(core=self.core))
+        layout.addWidget(self._pages)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Sidebar
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _build_sidebar(self) -> QFrame:
+        sidebar = QFrame()
+        sidebar.setFixedWidth(self._SIDEBAR_W)
+        sidebar.setStyleSheet(f"""
+            QFrame {{
+                background-color: #1C2833;
+                border: none;
+            }}
+            QPushButton {{
+                background: transparent;
+                color: #7F8C8D;
+                text-align: left;
+                padding: 13px 20px;
+                border: none;
+                font-size: 13px;
+                border-radius: 0;
+            }}
+            QPushButton:hover {{
+                background-color: #273444;
+                color: #ECF0F1;
+            }}
+            QPushButton:checked {{
+                background-color: transparent;
+                color: {_ACCENT};
+                font-weight: bold;
+                border-left: 3px solid {_ACCENT};
+                padding-left: 17px;
+            }}
+        """)
 
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        # Заголовок
-        title = QLabel("Portfolio\nOptimizer AI")
-        title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(title)
+        # Логотип / назва
+        logo = QWidget()
+        logo.setFixedHeight(72)
+        logo.setStyleSheet("background-color: #161D27;")
+        logo_layout = QVBoxLayout(logo)
+        logo_layout.setContentsMargins(20, 0, 0, 0)
+        logo_layout.setSpacing(2)
 
-        layout.addSpacing(20)
+        name = QLabel("Portfolio")
+        name.setStyleSheet("color: white; font-size: 17px; font-weight: 800; letter-spacing: 1px;")
+        sub = QLabel("OPTIMIZER")
+        sub.setStyleSheet(f"color: {_ACCENT}; font-size: 9px; letter-spacing: 2.5px;")
 
-        # Кнопки навігації
-        self.btn_data = QPushButton("📊 Market Data")
-        self.btn_algo = QPushButton("🧮 Optimization")
-        self.btn_backtest = QPushButton("📈 Backtesting")
+        logo_layout.addStretch()
+        logo_layout.addWidget(name)
+        logo_layout.addWidget(sub)
+        logo_layout.addStretch()
+        layout.addWidget(logo)
 
-        self.btn_data.setCheckable(True)
-        self.btn_algo.setCheckable(True)
-        self.btn_backtest.setCheckable(True)
+        layout.addWidget(self._hline())
+        layout.addSpacing(8)
 
-        # Логіка перемикання
-        self.btn_data.clicked.connect(lambda: self.switch_page(0))
-        self.btn_algo.clicked.connect(lambda: self.switch_page(1))
-        self.btn_backtest.clicked.connect(lambda: self.switch_page(2))
+        self._btn_data = self._nav_btn("Market Data", "📊")
+        self._btn_algo = self._nav_btn("Optimization", "🧮")
+        self._btn_back = self._nav_btn("Backtesting", "📈")
 
-        layout.addWidget(self.btn_data)
-        layout.addWidget(self.btn_algo)
-        layout.addWidget(self.btn_backtest)
+        self._btn_data.clicked.connect(lambda: self._switch(0))
+        self._btn_algo.clicked.connect(lambda: self._switch(1))
+        self._btn_back.clicked.connect(lambda: self._switch(2))
+
+        for btn in (self._btn_data, self._btn_algo, self._btn_back):
+            layout.addWidget(btn)
 
         layout.addStretch()
 
-        # Підвал
-        footer = QLabel("v0.1 Alpha\n© 2026 Diploma")
-        footer.setStyleSheet("color: #7F8C8D; font-size: 12px;")
-        footer.setAlignment(Qt.AlignCenter)
-        layout.addWidget(footer)
-        layout.addSpacing(10)
+        ver = QLabel("v0.1 Alpha  ·  © 2026")
+        ver.setStyleSheet("color: #2E4057; font-size: 10px; padding: 0 20px 14px 20px;")
+        ver.setAlignment(Qt.AlignLeft)
+        layout.addWidget(ver)
 
-        # Активуємо першу кнопку
-        self.btn_data.setChecked(True)
-
+        self._btn_data.setChecked(True)
         return sidebar
 
-    def create_placeholder_page(self, text):
-        """Тимчасова заглушка для сторінок"""
+    @staticmethod
+    def _nav_btn(text: str, icon: str) -> QPushButton:
+        btn = QPushButton(f"  {icon}  {text}")
+        btn.setCheckable(True)
+        btn.setFixedHeight(44)
+        return btn
+
+    @staticmethod
+    def _hline() -> QFrame:
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFixedHeight(1)
+        line.setStyleSheet("background-color: #2E4057; border: none;")
+        return line
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Сторінки
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _build_market_page(self) -> QWidget:
+        """Market Data Explorer: таблиця тікерів + StockChartWidget + Кнопка Sync."""
         page = QWidget()
-        # Прибрали жорсткий колір фону, тепер він системний
         layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        label = QLabel(text)
-        label.setAlignment(Qt.AlignCenter)
-        # Колір тексту не задаємо жорстко, щоб він адаптувався під тему
-        label.setStyleSheet("font-size: 32px; font-weight: bold;")
+        # ── Верхня панель ──
+        topbar = QWidget()
+        topbar.setFixedHeight(56)
+        topbar.setStyleSheet("border-bottom: 1px solid rgba(128,128,128,0.2);")
+        tb_layout = QHBoxLayout(topbar)
+        tb_layout.setContentsMargins(24, 0, 24, 0)
 
-        layout.addWidget(label)
+        title = QLabel("Market Data")
+        title.setStyleSheet("font-size: 18px; font-weight: 700; letter-spacing: 0.5px;")
+        tb_layout.addWidget(title)
+        tb_layout.addStretch()
+
+        # Кнопка оновлення даних
+        self.btn_sync = QPushButton("🔄 Синхронізувати дані")
+        self.btn_sync.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {_ACCENT};
+                border: 1px solid {_ACCENT};
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {_ACCENT};
+                color: white;
+            }}
+        """)
+        self.btn_sync.clicked.connect(self._on_sync_clicked)
+        tb_layout.addWidget(self.btn_sync)
+
+        layout.addWidget(topbar)
+
+        # ── Стек контенту (Дані АБО Спінер) ──
+        self.market_stack = QStackedWidget()
+
+        # 1. Віджет з даними (Таблиця + Графік)
+        data_view = QWidget()
+        content = QHBoxLayout(data_view)
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setSpacing(0)
+
+        self._table = QTableWidget()
+        self._table.setColumnCount(2)
+        self._table.setHorizontalHeaderLabels(["Ticker", "Sector"])
+        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.setShowGrid(False)
+        self._table.setFixedWidth(280)
+        self._table.setAlternatingRowColors(True)
+        self._table.itemClicked.connect(self._on_ticker_selected)
+        content.addWidget(self._table)
+
+        vline = QFrame()
+        vline.setFrameShape(QFrame.VLine)
+        vline.setFixedWidth(1)
+        vline.setStyleSheet("background-color: rgba(128,128,128,0.2); border: none;")
+        content.addWidget(vline)
+
+        self._stock_widget = StockChartWidget()
+        content.addWidget(self._stock_widget, 1)
+
+        self.market_stack.addWidget(data_view)
+
+        # 2. Віджет спінера (ховається за замовчуванням)
+        self.market_spinner = OptimizingSpinner()
+        self.market_stack.addWidget(self.market_spinner)
+
+        layout.addWidget(self.market_stack, 1)
+
+        self._load_tickers()
         return page
 
-    def init_data_page(self):
-        """Ініціалізація сторінки Market Data Explorer"""
-        self.page_data = QWidget()
-        # Прибрали background-color, щоб використовувати системний (темний/світлий)
+    @staticmethod
+    def _build_placeholder(text: str) -> QWidget:
+        page = QWidget()
+        lyt = QVBoxLayout(page)
+        lbl = QLabel(text)
+        lbl.setAlignment(Qt.AlignCenter)
+        lbl.setStyleSheet(
+            "font-size: 28px; font-weight: 700; color: palette(mid); letter-spacing: 1px;"
+        )
+        lyt.addWidget(lbl)
+        return page
 
-        layout = QVBoxLayout(self.page_data)
+    def _build_optimization_page(self) -> QWidget:
+        """Сторінка оптимізації (поки що показує вічний красивий спінер)."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
 
-        header = QLabel("Market Data Explorer")
-        # Прибрали колір тексту, щоб він був системним (білим на темному, чорним на світлому)
-        header.setStyleSheet("font-size: 24px; font-weight: bold; margin: 10px;")
-        layout.addWidget(header)
+        # Створюємо наш гарний спінер
+        self.optimization_spinner = OptimizingSpinner(page)
+        layout.addWidget(self.optimization_spinner)
 
-        content = QHBoxLayout()
+        # Одразу запускаємо його з крутим текстом
+        self.optimization_spinner.start(
+            "Налаштування середовища...\nЗапуск еволюційних алгоритмів та LSTM"
+        )
 
-        # 1. Таблиця активів
-        self.table = QTableWidget()
-        self.table.setColumnCount(2)
-        self.table.setHorizontalHeaderLabels(["Ticker", "Sector"])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.itemClicked.connect(self.on_asset_selected)
+        return page
+    # ─────────────────────────────────────────────────────────────────────────
+    # Навігація
+    # ─────────────────────────────────────────────────────────────────────────
 
-        # Стилізація таблиці: мінімалізм, щоб не ламати темну тему
-        self.table.setStyleSheet("""
-            QHeaderView::section { background-color: #34495E; color: white; padding: 5px; }
-        """)
-        content.addWidget(self.table, 1)
+    def _switch(self, index: int) -> None:
+        self._pages.setCurrentIndex(index)
+        for i, btn in enumerate((self._btn_data, self._btn_algo, self._btn_back)):
+            btn.setChecked(i == index)
 
-        # 2. Графік
-        self.canvas = MplCanvas(self, width=5, height=4, dpi=100)
-        content.addWidget(self.canvas, 2)
+    # ─────────────────────────────────────────────────────────────────────────
+    # Дані
+    # ─────────────────────────────────────────────────────────────────────────
 
-        layout.addLayout(content)
-        self.load_assets_to_table()
+    def _load_tickers(self) -> None:
+        """Завантажує список тікерів з БД у таблицю."""
+        tickers = sorted(self._repo.get_all_tickers())
+        self._table.setRowCount(len(tickers))
+        self._table.setSortingEnabled(False)
+        for row, ticker in enumerate(tickers):
+            self._table.setItem(row, 0, QTableWidgetItem(ticker))
+            self._table.setItem(row, 1, QTableWidgetItem("S&P 500"))
+        self._table.setSortingEnabled(True)
 
-    def switch_page(self, index):
-        self.pages.setCurrentIndex(index)
-        self.btn_data.setChecked(index == 0)
-        self.btn_algo.setChecked(index == 1)
-        self.btn_backtest.setChecked(index == 2)
-
-    def load_assets_to_table(self):
-        """Завантаження списку тікерів з БД у таблицю"""
-        tickers = self.repo.get_all_tickers()
-
-        # Сортуємо для зручності
-        tickers.sort()
-
-        self.table.setRowCount(len(tickers))
-        self.table.setSortingEnabled(False)
-
-        for i, ticker in enumerate(tickers):
-            self.table.setItem(i, 0, QTableWidgetItem(ticker))
-            self.table.setItem(i, 1, QTableWidgetItem("S&P 500"))
-
-        self.table.setSortingEnabled(True)
-
-    def on_asset_selected(self, item):
-        """Обробка вибору активу користувачем"""
-        row = item.row()
-        ticker = self.table.item(row, 0).text()
-
-        # Отримуємо історичні дані
-        quotes = self.repo.get_quotes(ticker)
+    def _on_ticker_selected(self, item: QTableWidgetItem) -> None:
+        """Обробляє клік по рядку таблиці: завантажує та відображає графік."""
+        ticker = self._table.item(item.row(), 0).text()
+        quotes = self._repo.get_quotes(ticker)
         if not quotes.empty:
-            self.update_chart(ticker, quotes)
+            self._stock_widget.load(ticker=ticker, data=quotes)
+        else:
+            logger.warning("Немає даних для тікера: %s", ticker)
 
-    def update_chart(self, ticker, data):
-        """Візуалізація графіка"""
-        self.canvas.axes.cla()  # Очистити старий графік
+    # ─────────────────────────────────────────────────────────────────────────
+    # Синхронізація (Фонові задачі)
+    # ─────────────────────────────────────────────────────────────────────────
 
-        # Малюємо Adj Close
-        self.canvas.axes.plot(data['date'], data['adj_close'], label='Adj Close', color='#2980B9', linewidth=1.5)
+    def _on_sync_clicked(self) -> None:
+        """Запускає фонове оновлення бази даних."""
+        # Показуємо спінер
+        self.market_stack.setCurrentIndex(1)
+        self.market_spinner.start("З'єднання з сервером...")
 
-        self.canvas.axes.set_title(f"Price History: {ticker}", fontsize=12, fontweight='bold')
-        self.canvas.axes.legend(loc='upper left')
-        self.canvas.axes.grid(True, linestyle='--', alpha=0.5)
+        # Запускаємо Worker
+        self._worker = DataSyncWorker(self.core)
+        self._worker.progress_updated.connect(self.market_spinner.update_progress)
+        self._worker.finished.connect(self._on_sync_finished)
+        self._worker.error.connect(self._on_sync_error)
+        self._worker.start()
 
-        # Форматування осі X
-        self.canvas.axes.tick_params(axis='x', rotation=45)
+    def _on_sync_finished(self, result: dict) -> None:
+        """Викликається, коли завантаження успішно завершено."""
+        self.market_spinner.stop()
+        self.market_stack.setCurrentIndex(0)  # Повертаємо таблицю та графік
+        self._load_tickers()  # Оновлюємо таблицю новими даними
 
-        self.canvas.figure.tight_layout()
-        self.canvas.draw()
+        QMessageBox.information(
+            self,
+            "Синхронізація успішна",
+            f"Оновлено активів: {result.get('assets_updated', 0)}"
+        )
+
+    def _on_sync_error(self, err_msg: str) -> None:
+        """Обробка помилок під час завантаження."""
+        self.market_spinner.stop()
+        self.market_stack.setCurrentIndex(0)
+        logger.error("Data sync failed: %s", err_msg)
+        QMessageBox.critical(self, "Помилка синхронізації", f"Сталася помилка:\n{err_msg}")

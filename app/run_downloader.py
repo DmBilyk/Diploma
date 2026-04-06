@@ -37,12 +37,31 @@ def main():
 
     print(f"Target: {len(tickers)} assets.")
 
+    # 2.5 Перевірка наявності даних для дельта-оновлення
+    print("\n[Step 2.5] Checking latest recorded data for delta update...")
+    from datetime import datetime as dt, timedelta
+    latest_date = repo.get_latest_quote_date()
+    
+    start_date = None
+    if latest_date:
+        if isinstance(latest_date, dt):
+            start_date = latest_date - timedelta(days=7)
+        else:
+            start_date = dt(latest_date.year, latest_date.month, latest_date.day) - timedelta(days=7)
+        print(f"   Found existing data up to {latest_date}. Preparing Delta Update.")
+    else:
+        print("   Database is empty or missing quotes. Preparing full 30-year sync.")
+
     # 3. Завантаження даних
-    print("\n[Step 2] Downloading historical data (30 years, Weekly)...")
-    market_data = engine.download_market_data(tickers)
+    if start_date:
+        print(f"\n[Step 3] Downloading historical data (Delta Update from {start_date.strftime('%Y-%m-%d')}, Weekly)...")
+    else:
+        print("\n[Step 3] Downloading historical data (30 years, Weekly)...")
+        
+    market_data = engine.download_market_data(tickers, start_date=start_date)
 
     # 4. Збереження в БД
-    print(f"\n[Step 3] Saving {len(market_data)} assets to SQLite...")
+    print(f"\n[Step 4] Saving {len(market_data)} assets to SQLite...")
 
     start_time = time.time()
     counter = 0

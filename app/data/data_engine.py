@@ -39,26 +39,34 @@ class DataEngine:
             # Резервний список, якщо парсинг не вдався
             return ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "JPM", "V", "PG"]
 
-    def download_market_data(self, tickers: List[str]) -> Dict[str, pd.DataFrame]:
-        """
-        Завантажує дані за останні 30 років з тижневим інтервалом.
-        """
+    def download_market_data(self, tickers: List[str], start_date: datetime = None, progress_callback=None) -> Dict[
+        str, pd.DataFrame]:
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=30 * 365)
 
-        start_str = start_date.strftime('%Y-%m-%d')
+        if start_date is None:
+            actual_start_date = end_date - timedelta(days=30 * 365)
+            chunk_size = 50
+        else:
+            actual_start_date = start_date
+            chunk_size = 100
+
+        start_str = actual_start_date.strftime('%Y-%m-%d')
         end_str = end_date.strftime('%Y-%m-%d')
         INTERVAL = "1wk"
 
-        print(f"🚀 Config: 30 Years ({start_str} to {end_str}), Interval: {INTERVAL}")
-
-        chunk_size = 50
         valid_data = {}
+        total_tickers = len(tickers)
 
-        # Пакетне завантаження
-        for i in range(0, len(tickers), chunk_size):
+
+        for i in range(0, total_tickers, chunk_size):
             batch = tickers[i: i + chunk_size]
-            print(f"   ⬇️ Batch {i // chunk_size + 1}: {batch[:3]}... ({len(batch)} items)")
+
+
+            if progress_callback:
+
+                current_pct = 10 + int((i / total_tickers) * 80)
+                progress_callback(current_pct, f"Завантаження з Yahoo: {batch[0]}... ({i}/{total_tickers})")
+
 
             try:
                 data = yf.download(
@@ -72,7 +80,7 @@ class DataEngine:
                     progress=False
                 )
 
-                batch_results = self._process_batch_result(data, batch)
+                batch_results = self._process_batch_result(data, batch, min_length=0 if start_date else 100)
                 valid_data.update(batch_results)
 
                 time.sleep(1)
@@ -80,10 +88,9 @@ class DataEngine:
             except Exception as e:
                 print(f"   ⚠️ Batch error: {e}")
 
-        print(f"🏁 Downloaded {len(valid_data)} assets.")
         return valid_data
 
-    def _process_batch_result(self, data: pd.DataFrame, requested_tickers: List[str]) -> Dict[str, pd.DataFrame]:
+    def _process_batch_result(self, data: pd.DataFrame, requested_tickers: List[str], min_length: int = 100) -> Dict[str, pd.DataFrame]:
         results = {}
 
         # 1. Один тікер (плоский DataFrame)
@@ -99,8 +106,8 @@ class DataEngine:
                 if ticker in data.columns.levels[0]:
                     df_ticker = data[ticker].copy()
 
-                    # Відкидаємо зовсім порожні або надто короткі історії (< 2 років даних)
-                    if len(df_ticker.dropna(how='all')) > 100:
+                    # Відкидаємо зовсім порожні або надто короткі історії (якщо мануально не вказано min_length)
+                    if len(df_ticker.dropna(how='all')) > min_length:
                         cleaned = self._clean_dataframe(df_ticker)
                         if not cleaned.empty:
                             results[ticker] = cleaned
@@ -124,13 +131,11 @@ class DataEngine:
         # Протягуємо вперед (якщо були свята)
         df = df.ffill()
 
-        # Перевірка на "мертвий" актив (банкрутство / делістинг):
-        # якщо остання реальна дата торгів раніше за кінець діапазону даних,
-        # заповнюємо всі дні ПІСЛЯ неї мінімальним значенням (≈0),
-        # щоб уникнути помилок ділення на нуль в оптимізаторі.
+
         if price_col in df.columns and last_valid_idx is not None:
             end_of_data = df.index[-1]
-            if last_valid_idx < end_of_data:
+
+            if (end_of_data - last_valid_idx).days > 14:
                 dead_mask = df.index > last_valid_idx
                 numeric_cols = df.select_dtypes(include='number').columns
                 df.loc[dead_mask, numeric_cols] = 0.0001

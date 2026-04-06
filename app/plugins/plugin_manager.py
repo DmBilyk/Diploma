@@ -54,9 +54,11 @@ class PluginManager:
 
                         # Inspect module for BaseOptimizer subclasses
                         for name, obj in inspect.getmembers(module, inspect.isclass):
-                            if issubclass(obj, BaseOptimizer) and obj is not BaseOptimizer:
-                                # Ensure we only pick classes defined in the plugin file,
-                                # not those imported from elsewhere
+
+                            base_names = [base.__name__ for base in obj.__bases__]
+
+                            if "BaseOptimizer" in base_names and name != "BaseOptimizer":
+                                # Ensure we only pick classes defined in the plugin file
                                 if obj.__module__ == module_name:
                                     discovered_plugins[name] = obj
 

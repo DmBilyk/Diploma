@@ -34,6 +34,155 @@ logging.basicConfig(
 # Suppress numpy overflow warnings in fitness calculations
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
+from numba import njit
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  NUMBA JIT KERNELS (Без об'єктів та класів)
+# ═══════════════════════════════════════════════════════════════════════════
+@njit(cache=True)
+def _sharpe_numba(w, mu, cov, rf):
+    port_return = np.dot(w, mu)
+    port_var = np.dot(w, np.dot(cov, w))
+    if port_var <= 0:
+        return -1e6
+    port_std = np.sqrt(port_var)
+    return (port_return - rf) / port_std
+
+
+@njit(cache=True)
+def _evaluate_numba(weights, binary, mu, cov, rf, K, lam_k, lam_neg):
+    w = weights * binary
+    w_sum = np.sum(w)
+
+    if w_sum > 1e-8:
+        w = w / w_sum
+    else:
+        return -1e6, w
+
+    sr = _sharpe_numba(w, mu, cov, rf)
+
+    p_card = lam_k * max(0.0, np.sum(binary) - float(K))
+    p_neg = lam_neg * np.sum(np.maximum(0.0, -w))
+
+    safe_max_weight = max(0.15, (1.0 / K) + 0.02)
+    p_max_w = 100.0 * np.sum(np.maximum(0.0, w - safe_max_weight))
+
+    fitness = sr - p_card - p_neg - p_max_w
+    return fitness, w
+
+
+@njit(cache=True)
+def _gradient_numba(w, mu, cov, rf):
+    port_ret = np.dot(w, mu)
+    cov_w = np.dot(cov, w)
+    port_var = np.dot(w, cov_w)
+    if port_var <= 0:
+        return np.zeros_like(w)
+    port_std = np.sqrt(port_var)
+    sr = (port_ret - rf) / port_std
+    return (mu - rf) / port_std - sr * cov_w / port_var
+
+
+@njit(cache=True)
+def _refine_numba(weights, binary, mu, cov, rf, max_iter, lr_init, lr_decay):
+    w = weights.copy()
+    b = binary.copy()
+    lr = lr_init
+    n = len(w)
+
+    # Phase 1: weight-only optimisation
+    for _ in range(max_iter):
+        grad = _gradient_numba(w, mu, cov, rf)
+        grad_masked = grad * b
+
+        w_new = w + lr * grad_masked
+        w_new = np.maximum(w_new, 0.0)
+        w_new = w_new * b
+        w_sum = np.sum(w_new)
+        if w_sum < 1e-12:
+            break
+        w_new = w_new / w_sum
+
+        if _sharpe_numba(w_new, mu, cov, rf) > _sharpe_numba(w, mu, cov, rf):
+            w = w_new
+            lr *= lr_decay
+        else:
+            lr *= 0.5
+            if lr < 1e-8:
+                break
+
+    # Phase 2: try swapping in better assets
+    failed_swaps = np.zeros(n, dtype=np.bool_)
+
+    for _ in range(max_iter // 2):
+        grad = _gradient_numba(w, mu, cov, rf)
+
+
+        best_inactive = -1
+        best_inactive_val = -1e9
+        worst_active = -1
+        worst_active_val = 1e9
+
+        for i in range(n):
+            if b[i] < 0.5 and not failed_swaps[i]:
+                if grad[i] > best_inactive_val:
+                    best_inactive_val = grad[i]
+                    best_inactive = i
+            elif b[i] > 0.5:
+                if w[i] < worst_active_val:
+                    worst_active_val = w[i]
+                    worst_active = i
+
+        if best_inactive == -1 or worst_active == -1:
+            break
+
+        if best_inactive_val <= grad[worst_active]:
+            failed_swaps[best_inactive] = True
+            continue
+
+        new_b = b.copy()
+        new_b[worst_active] = 0.0
+        new_b[best_inactive] = 1.0
+
+        new_w = w.copy()
+        new_w[worst_active] = 0.0
+        saved_weight = w[worst_active]
+        new_w[worst_active] = 0.0
+        new_w[best_inactive] = saved_weight
+        new_w = new_w * new_b
+
+        s = np.sum(new_w)
+        if s < 1e-12:
+            failed_swaps[best_inactive] = True
+            continue
+        new_w = new_w / s
+
+        lr2 = lr_init
+        for _ in range(15):
+            g = _gradient_numba(new_w, mu, cov, rf) * new_b
+            cand = np.maximum(new_w + lr2 * g, 0.0) * new_b
+            cs = np.sum(cand)
+            if cs < 1e-12:
+                break
+            cand = cand / cs
+            if _sharpe_numba(cand, mu, cov, rf) > _sharpe_numba(new_w, mu, cov, rf):
+                new_w = cand
+                lr2 *= lr_decay
+            else:
+                lr2 *= 0.5
+                if lr2 < 1e-8:
+                    break
+
+        if _sharpe_numba(new_w, mu, cov, rf) > _sharpe_numba(w, mu, cov, rf):
+            w = new_w
+            b = new_b
+            failed_swaps[:] = False
+        else:
+            failed_swaps[best_inactive] = True
+
+    return w, b
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  DATA CLASSES
@@ -78,8 +227,15 @@ class OptimizationResult:
 class DataLoader:
     """Retrieve historical return data from the project database."""
 
-    def __init__(self, repo: Optional[PortfolioRepository] = None):
+    def __init__(
+        self,
+        repo: Optional[PortfolioRepository] = None,
+        ewma_span: int = 52,
+    ):
         self.repo = repo or PortfolioRepository()
+        # Span (in periods) for EWMA expected-return estimation.
+        # Higher values → smoother μ; lower → faster regime adaptation.
+        self.ewma_span = ewma_span
 
     def load(
         self,
@@ -133,8 +289,11 @@ class DataLoader:
         tickers = list(prices.columns)
 
         # --- pypfopt: robust μ, Σ -----------------------------------------
-        # Використовуємо ті ж самі надійні методи (Ledoit-Wolf), що і в Марковіці
-        mu = expected_returns.mean_historical_return(prices, frequency=frequency).values
+        # Використовуємо класичне середнє геометричне (CAGR) замість EWMA.
+        # Це не дає алгоритму "перегріватися" на останньому році історії.
+        mu = expected_returns.mean_historical_return(
+            prices, frequency=frequency, compounding=True
+        ).values
         cov = risk_models.CovarianceShrinkage(prices, frequency=frequency).ledoit_wolf().values
 
         logger.info(
@@ -174,46 +333,22 @@ class FitnessEvaluator:
 
     # ----- core -----------------------------------------------------------
     def sharpe(self, w: np.ndarray) -> float:
-        """Raw Sharpe Ratio (no penalty)."""
-        port_return = w @ self.mu
-        port_var = w @ self.cov @ w
-        if port_var <= 0:
-            return -1e6
-        port_std = np.sqrt(port_var)
-        return (port_return - self.rf) / port_std
+        return _sharpe_numba(w, self.mu, self.cov, self.rf)
 
     def evaluate(self, ind: Individual) -> float:
-        """Compute penalised fitness for *ind* and store it in-place."""
-        w = ind.weights * ind.binary  # zero-out non-selected assets
-        w_sum = w.sum()
-
-        # Normalise if sum is close enough (soft repair)
-        if w_sum > 1e-8:
-            w = w / w_sum
-        else:
-            ind.fitness = -1e6
-            return ind.fitness
-
-        sr = self.sharpe(w)
-
-        # Penalties
-        p_sum = self.lam_w * abs(w.sum() - 1.0)
-        p_card = self.lam_k * max(0, ind.binary.sum() - self.K)
-        p_neg = self.lam_neg * np.sum(np.maximum(0.0, -w))
-
-        ind.fitness = sr - p_sum - p_card - p_neg
-        # Store effective weights back (after binary masking + normalisation)
+        """Делегуємо важкі обчислення у скомпільоване ядро."""
+        fitness, w = _evaluate_numba(
+            ind.weights, ind.binary,
+            self.mu, self.cov, self.rf,
+            self.K, self.lam_k, self.lam_neg
+        )
+        ind.fitness = fitness
         ind.weights = w
         return ind.fitness
 
     # ----- gradient (numerical) -------------------------------------------
     def gradient(self, w: np.ndarray) -> np.ndarray:
-        port_ret = w @ self.mu
-        cov_w = self.cov @ w
-        port_var = w @ cov_w
-        port_std = np.sqrt(port_var)
-        sr = (port_ret - self.rf) / port_std
-        return (self.mu - self.rf) / port_std - sr * cov_w / port_var
+        return _gradient_numba(w, self.mu, self.cov, self.rf)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -232,9 +367,11 @@ class EvoOperators:
         mutation_prob: float = 0.15,
         bit_flip_prob: float = 0.10,
         rng: Optional[np.random.Generator] = None,
+        cov: Optional[np.ndarray] = None,
     ):
         self.n = n_assets
         self.K = max_cardinality
+        self._cov = cov  # used for risk-adjusted seeding in init_population
         self.tourn = tournament_size
         self.cx_alpha = crossover_alpha
         self.mut_sigma = mutation_sigma
@@ -242,16 +379,22 @@ class EvoOperators:
         self.bit_flip = bit_flip_prob
         self.rng = rng or np.random.default_rng()
 
+        # Baselines for the variance thermostat (Upgrade 2).
+        # The thermostat heats / cools mut_sigma and mut_prob relative
+        # to these immutable reference values.
+        self._base_mut_sigma = mutation_sigma
+        self._base_mut_prob = mutation_prob
+
     # ----- initialisation -------------------------------------------------
     def random_individual(self) -> Individual:
         """Create a random feasible individual."""
-        # Binary: select at most K assets uniformly
+        # Бінарна маска: випадкове число активів від 1 до K, вибраних без заміни.
         k = self.rng.integers(1, self.K + 1)
         chosen = self.rng.choice(self.n, size=k, replace=False)
         binary = np.zeros(self.n, dtype=np.float64)
         binary[chosen] = 1.0
 
-        # Weights: Dirichlet → long-only, sums to 1
+        # Щоб в сумі було 1, генеруємо випадкові ваги для вибраних активів з діріхле-розподілу.
         raw = self.rng.dirichlet(np.ones(k))
         weights = np.zeros(self.n, dtype=np.float64)
         weights[chosen] = raw
@@ -259,15 +402,21 @@ class EvoOperators:
         return Individual(weights=weights, binary=binary)
 
     def init_population(self, pop_size: int, mu: Optional[np.ndarray] = None) -> List[Individual]:
-        """Initialize population. If mu provided, seed top-20% with high-SR individuals."""
+        """Ініціалізуємо популяцію, частково посіваючи її "розумними" індивідами на основі μ."""
         population = []
 
         if mu is not None:
-            # Seed ~20% of population with smart individuals
+            # Персеяємо перші ~20% популяції індивідами, які вибирають топ-активи за μ (з урахуванням ризику, якщо є Σ).
             n_seeded = max(1, pop_size // 5)
-            # Top-K assets by individual Sharpe proxy (mu / sqrt(diag(cov)))
-            # Here we just use mu ranking as a quick proxy
-            top_idx = np.argsort(mu)[::-1]
+            # K-найкращі активи за μ, відсортовані з урахуванням ризику (якщо є Σ).
+            # Використовуємо "шарп-проксі" (μ / σ) для ранжування, щоб врахувати ризик. Якщо Σ відсутня, просто ранжуємо за μ.
+            # Щоб уникнути ділення на нуль, додаємо невеликий ε до стандартного відхилення.
+            if self._cov is not None:
+                per_asset_std = np.sqrt(np.maximum(np.diag(self._cov), 1e-12))
+                sharpe_proxy = mu / per_asset_std
+            else:
+                sharpe_proxy = mu
+            top_idx = np.argsort(sharpe_proxy)[::-1]
 
             for i in range(n_seeded):
                 # Each seeded individual takes top-k random subset from top assets
@@ -290,7 +439,7 @@ class EvoOperators:
 
     # ----- selection ------------------------------------------------------
     def tournament_select(self, population: List[Individual]) -> Individual:
-        """Tournament selection with replacement."""
+        """Груповий турнір настунпого батька."""
         idxs = self.rng.choice(len(population), size=self.tourn, replace=False)
         best = max(idxs, key=lambda i: population[i].fitness)
         return population[best].copy()
@@ -361,6 +510,19 @@ class EvoOperators:
             active = np.where(ind.binary > 0.5)[0]
             ind.weights[active] = 1.0 / len(active)
 
+    # ----- variance thermostat --------------------------------------------
+    def heat_up(
+        self, factor: float = 1.25, sigma_cap: float = 0.30, prob_cap: float = 0.60,
+    ) -> None:
+        """Increase mutation rates by *factor* (stagnation detected)."""
+        self.mut_sigma = min(self.mut_sigma * factor, sigma_cap)
+        self.mut_prob = min(self.mut_prob * factor, prob_cap)
+
+    def cool_down(self, decay: float = 0.95) -> None:
+        """Decay mutation rates back toward their baselines."""
+        self.mut_sigma = max(self.mut_sigma * decay, self._base_mut_sigma)
+        self.mut_prob = max(self.mut_prob * decay, self._base_mut_prob)
+
     # ----- elitism --------------------------------------------------------
     @staticmethod
     def elitism(
@@ -398,101 +560,18 @@ class LocalRefiner:
         self.lr_decay = lr_decay
 
     def refine(self, ind: Individual) -> Individual:
-        """Apply gradient-ascent local search, returns an improved copy.
-
-        Phase 1 (first half of iterations): optimise weights WITH binary mask fixed.
-        Phase 2 (second half): allow gradient to pull in deselected assets
-                               if their gradient signal is strong enough.
-        """
+        """Передаємо розплющені параметри до Numba."""
         best = ind.copy()
-        evaluator = self.evaluator
-        K = evaluator.K
 
-        # ── Phase 1: weight-only optimisation ────────────────────────────────
-        w = best.weights.copy()
-        lr = self.lr_init
+        new_w, new_b = _refine_numba(
+            best.weights, best.binary,
+            self.evaluator.mu, self.evaluator.cov, self.evaluator.rf,
+            self.max_iter, self.lr_init, self.lr_decay
+        )
 
-        for _ in range(self.max_iter):
-            grad = evaluator.gradient(w)
-            grad_masked = grad * best.binary  # only selected assets
-
-            w_new = w + lr * grad_masked
-            w_new = np.maximum(w_new, 0.0)
-            w_new *= best.binary
-            w_sum = w_new.sum()
-            if w_sum < 1e-12:
-                break
-            w_new /= w_sum
-
-            if evaluator.sharpe(w_new) > evaluator.sharpe(w):
-                w = w_new
-                lr *= self.lr_decay
-            else:
-                lr *= 0.5
-                if lr < 1e-8:
-                    break
-
-        best.weights = w
-
-        # ── Phase 2: try swapping in better assets ────────────────────────────
-        # Compute full gradient and look for deselected assets with strong signal
-        for _ in range(self.max_iter // 2):
-            grad = evaluator.gradient(w)
-            active_idx = np.where(best.binary > 0.5)[0]
-            inactive_idx = np.where(best.binary < 0.5)[0]
-
-            if len(inactive_idx) == 0:
-                break
-
-            # Best inactive asset by gradient magnitude
-            best_inactive = inactive_idx[np.argmax(grad[inactive_idx])]
-            best_inactive_grad = grad[best_inactive]
-
-            # Worst active asset (smallest weight, likely to be kicked out)
-            worst_active = active_idx[np.argmin(w[active_idx])]
-
-            if best_inactive_grad <= grad[worst_active]:
-                break  # no improvement possible by swapping
-
-            # Try swap: remove worst, add best_inactive
-            new_binary = best.binary.copy()
-            new_binary[worst_active] = 0.0
-            new_binary[best_inactive] = 1.0
-
-            new_w = w.copy()
-            new_w[worst_active] = 0.0
-            new_w[best_inactive] = w[worst_active]  # transfer weight
-            new_w *= new_binary
-            s = new_w.sum()
-            if s < 1e-12:
-                continue
-            new_w /= s
-
-            # Local gradient polish on new asset set (few steps)
-            lr2 = self.lr_init
-            for _ in range(15):
-                g = evaluator.gradient(new_w) * new_binary
-                cand = np.maximum(new_w + lr2 * g, 0.0) * new_binary
-                cs = cand.sum()
-                if cs < 1e-12:
-                    break
-                cand /= cs
-                if evaluator.sharpe(cand) > evaluator.sharpe(new_w):
-                    new_w = cand
-                    lr2 *= self.lr_decay
-                else:
-                    lr2 *= 0.5
-                    if lr2 < 1e-8:
-                        break
-
-            if evaluator.sharpe(new_w) > evaluator.sharpe(w):
-                w = new_w
-                best.binary = new_binary
-            else:
-                break
-
-        best.weights = w
-        evaluator.evaluate(best)
+        best.weights = new_w
+        best.binary = new_b
+        self.evaluator.evaluate(best)
         return best
 
     # ----- simplex projection ---------------------------------------------
@@ -566,6 +645,10 @@ class HybridEvoOptimizer:
         penalty_weights: float = 100.0,
         penalty_cardinality: float = 50.0,
         penalty_negativity: float = 200.0,
+        # EWMA span for expected-return estimation (Upgrade 1)
+        ewma_span: int = 52,
+        # Variance thermostat threshold (Upgrade 2)
+        variance_threshold: float = 1e-5,
     ):
         self.pop_size = pop_size
         self.n_gen = n_generations
@@ -584,6 +667,8 @@ class HybridEvoOptimizer:
         self.penalty_weights = penalty_weights
         self.penalty_cardinality = penalty_cardinality
         self.penalty_negativity = penalty_negativity
+        self.ewma_span = ewma_span
+        self.variance_threshold = variance_threshold
 
     # =====================================================================
     #  PUBLIC API
@@ -613,7 +698,7 @@ class HybridEvoOptimizer:
         rng = np.random.default_rng(self.seed)
 
         # ── 1. Data loading ───────────────────────────────────────────────
-        loader = DataLoader(repo=repo)
+        loader = DataLoader(repo=repo, ewma_span=self.ewma_span)
         tickers, mu, cov, prices = loader.load(
             tickers=tickers,
             start_date=start_date,
@@ -646,6 +731,7 @@ class HybridEvoOptimizer:
             mutation_prob=self.mut_prob,
             bit_flip_prob=self.bit_flip,
             rng=rng,
+            cov=cov,
         )
 
         refiner = LocalRefiner(
@@ -654,11 +740,9 @@ class HybridEvoOptimizer:
             lr_init=self.local_lr,
         )
 
-        # ── 3. Evolutionary loop ──────────────────────────────────────────
+        # ── 3. Evolutionary loop (with variance thermostat) ────────────────
         population = operators.init_population(self.pop_size, mu=mu)
         history: List[float] = []
-        stagnation_counter = 0
-        best_ever = -np.inf
 
         for gen in range(self.n_gen):
             # Evaluate
@@ -668,28 +752,25 @@ class HybridEvoOptimizer:
             best_fit = max(ind.fitness for ind in population)
             history.append(best_fit)
 
-            # Stagnation detection + partial restart
-            if best_fit > best_ever + 1e-4:
-                best_ever = best_fit
-                stagnation_counter = 0
-            else:
-                stagnation_counter += 1
+            # ── Variance thermostat ──────────────────────────────────
+            # Instead of a destructive 50 % restart, smoothly adjust
+            # mutation intensity based on population fitness variance.
+            pop_variance = np.var([ind.fitness for ind in population])
 
-            if stagnation_counter >= 30:
-                # Replace bottom 50% with fresh random individuals
-                stagnation_counter = 0
-                ranked = sorted(population, key=lambda x: x.fitness, reverse=True)
-                n_keep = self.pop_size // 2
-                new_blood = operators.init_population(self.pop_size - n_keep, mu=mu)
-                population = ranked[:n_keep] + new_blood
-                logger.info("Gen %4d / %d  |  RESTART – stagnation detected", gen, self.n_gen)
-                continue
+            if pop_variance < self.variance_threshold:
+                # Stagnation → heat up (increase exploration)
+                operators.heat_up()
+            else:
+                # Healthy diversity → cool down toward baseline
+                operators.cool_down()
 
             if gen % 25 == 0 or gen == self.n_gen - 1:
                 avg_fit = np.mean([ind.fitness for ind in population])
                 logger.info(
-                    "Gen %4d / %d  |  best=%.4f  avg=%.4f",
-                    gen, self.n_gen, best_fit, avg_fit,
+                    "Gen %4d / %d  |  best=%.4f  avg=%.4f  var=%.2e  "
+                    "σ_mut=%.4f  p_mut=%.3f",
+                    gen, self.n_gen, best_fit, avg_fit, pop_variance,
+                    operators.mut_sigma, operators.mut_prob,
                 )
 
             # Elitism
@@ -742,17 +823,28 @@ class HybridEvoOptimizer:
                 return -evaluator.sharpe(w_full)
 
             constraints = [{"type": "eq", "fun": lambda w: w.sum() - 1.0}]
-            bounds = [(0.0, 1.0)] * len(active)
+
+
+            safe_max_weight = max(0.15, (1.0 / len(active)) + 0.02)
+            bounds = [(0.0, safe_max_weight)] * len(active)
+
             res = minimize(neg_sharpe, w0, method="SLSQP",
                            bounds=bounds, constraints=constraints,
                            options={"maxiter": 500, "ftol": 1e-10})
-            if res.success and -res.fun > champion_pre.fitness:
+            if res.success:
                 w_full = np.zeros(n_assets)
                 w_full[active] = np.maximum(res.x, 0)
                 w_full /= w_full.sum()
-                champion_pre.weights = w_full
-                evaluator.evaluate(champion_pre)
-                logger.info("Scipy SLSQP improved Sharpe to %.4f", champion_pre.fitness)
+                # Build a temporary Individual to evaluate penalised fitness,
+                # so we compare apples-to-apples (fitness vs fitness).
+                from copy import deepcopy
+                candidate = deepcopy(champion_pre)
+                candidate.weights = w_full
+                evaluator.evaluate(candidate)
+                if candidate.fitness > champion_pre.fitness:
+                    champion_pre.weights = w_full
+                    champion_pre.fitness = candidate.fitness
+                    logger.info("Scipy SLSQP improved Sharpe to %.4f", champion_pre.fitness)
             refined.append(champion_pre)
         except ImportError:
             pass
@@ -802,6 +894,9 @@ class HybridEvoOptimizer:
         for ticker, w in sorted(result.weights.items(), key=lambda x: x[1], reverse=True):
             logger.info("    %-8s  %.2f%%", ticker, w * 100)
         logger.info("=" * 60)
+
+
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════
