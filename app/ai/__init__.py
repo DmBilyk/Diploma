@@ -1,14 +1,26 @@
 """
-app.ai — LSTM-based AI module for portfolio return prediction.
+app/ai
+======
 
-Public API
-----------
-PortfolioLSTMModel       – TensorFlow/Keras LSTM model
-TrainingWorker           – QThread for non-blocking training
-predict_expected_returns – generate μ vector from a trained model
-run_lstm_optimization    – end-to-end LSTM → evolutionary optimizer pipeline
+PPO-based reinforcement-learning portfolio optimiser.
+
+Public surface
+--------------
+``PortfolioEnv``          – Gymnasium environment
+``PPOPortfolioTrainer``   – training pipeline
+``PPOInference``          – load model + extract weights
+``load_and_prepare``      – data loading & splitting
 """
 
-from ai.lstm_model import PortfolioLSTMModel
-from ai.training_worker import TrainingWorker
-from ai.predictor import predict_expected_returns, run_lstm_optimization
+from app.ai.environment import PortfolioEnv
+from app.ai.inference import PPOInference
+from app.ai.trainer import PPOPortfolioTrainer
+from app.ai.data_prep import load_and_prepare, DataSplit
+
+__all__ = [
+    "PortfolioEnv",
+    "PPOPortfolioTrainer",
+    "PPOInference",
+    "load_and_prepare",
+    "DataSplit",
+]

@@ -53,3 +53,38 @@ class BacktestWorker(QThread):
         except Exception as exc:
             logger.exception("BacktestWorker failed")
             self.error.emit(str(exc))
+
+
+
+"""
+==================
+QThread-воркер для завантаження даних у фоновому потоці.
+UI залишається живим, прогрес передається через сигнали.
+"""
+class DataLoaderWorker(QThread):
+    """
+    Запускає ensure_database_populated у фоновому потоці.
+    Передає прогрес у головний потік через Qt-сигнали.
+    """
+
+    # Сигнал: (відсоток 0-100, повідомлення)
+    progress = Signal(int, str)
+    # Сигнал: завантаження завершено (True = були нові дані, False = БД вже заповнена)
+    finished = Signal(bool)
+    # Сигнал: помилка під час завантаження
+    error = Signal(str)
+
+    def run(self):
+        """Виконується в окремому потоці."""
+        try:
+            from app.data.db_bootstrap import ensure_database_populated
+
+            def on_progress(percent: int, message: str):
+                # emit() безпечний між потоками — Qt поставить у чергу
+                self.progress.emit(percent, message)
+
+            result = ensure_database_populated(progress_callback=on_progress)
+            self.finished.emit(result)
+
+        except Exception as exc:
+            self.error.emit(str(exc))

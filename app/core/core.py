@@ -304,6 +304,213 @@ class PortfolioCore:
         return result, mu_dict
 
     # ══════════════════════════════════════════════════════════════════
+    #  3.5 PPO / REINFORCEMENT LEARNING OPTIMISATION
+    # ══════════════════════════════════════════════════════════════════
+
+    def train_ppo(
+            self,
+            start_date: Optional[str] = None,
+            end_date: Optional[str] = None,
+            tickers: Optional[List[str]] = None,
+            max_assets: int = 50,
+            min_coverage: float = 0.95,
+            train_frac: float = 0.70,
+            val_frac: float = 0.15,
+            model_dir: str = "models/ppo_portfolio",
+            total_timesteps: int = 500_000,
+            curriculum: bool = True,
+            env_kwargs: Optional[Dict[str, Any]] = None,
+            ppo_kwargs: Optional[Dict[str, Any]] = None,
+            tensorboard_log: Optional[str] = None,
+            seed: Optional[int] = 42,
+            resume_from: Optional[str] = None,
+    ) -> str:
+        """Train a PPO portfolio agent and return the path to the saved model."""
+        # Відкладені імпорти для збереження легкості Facade
+        from app.ai.data_prep import load_and_prepare
+        from app.ai.trainer import PPOPortfolioTrainer
+        from pathlib import Path
+
+        split = load_and_prepare(
+            repo=self.repo,
+            tickers=tickers,
+            start_date=start_date or "2010-01-01",
+            end_date=end_date or "2023-12-31",
+            max_assets=max_assets,
+            min_coverage=min_coverage,
+            train_frac=train_frac,
+            val_frac=val_frac,
+        )
+
+        trainer = PPOPortfolioTrainer(
+            returns_df=split.train,
+            model_dir=model_dir,
+            env_kwargs=env_kwargs,
+            ppo_kwargs=ppo_kwargs,
+            tensorboard_log=tensorboard_log,
+            seed=seed,
+        )
+
+        trainer.train(
+            total_timesteps=total_timesteps,
+            curriculum=curriculum,
+            resume_from=resume_from,
+        )
+
+        final_path = str(Path(model_dir) / "final_model.zip")
+        logger.info("PPO training complete. Model at: %s", final_path)
+        return final_path
+
+    def run_ppo_optimization(
+            self,
+            model_path: str,
+            tickers: Optional[List[str]] = None,
+            start_date: Optional[str] = None,
+            end_date: Optional[str] = None,
+            max_assets: int = 50,
+            top_n: Optional[int] = 15,
+            min_weight: float = 0.01,
+            env_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, float]:
+        """Extract portfolio weights from a trained PPO model."""
+        # Відкладені імпорти
+        from app.ai.data_prep import load_and_prepare
+        from app.ai.inference import PPOInference
+
+        split = load_and_prepare(
+            repo=self.repo,
+            tickers=tickers,
+            start_date=start_date or "2010-01-01",
+            end_date=end_date or "2023-12-31",
+            max_assets=max_assets,
+            train_frac=1.0,  # use all data for inference (no split needed)
+            val_frac=0.0,
+        )
+
+        inference = PPOInference(model_path=model_path, env_kwargs=env_kwargs or {})
+        weights = inference.get_final_weights(
+            returns_df=split.train,
+            top_n=top_n,
+            min_weight=min_weight,
+        )
+        return weights
+
+    def train_and_backtest_ppo(
+            self,
+            start_date: Optional[str] = None,
+            train_end: Optional[str] = None,
+            end_date: Optional[str] = None,
+            tickers: Optional[List[str]] = None,
+            max_assets: int = 50,
+            model_dir: str = "models/ppo_portfolio",
+            total_timesteps: int = 500_000,
+            curriculum: bool = True,
+            top_n: Optional[int] = 15,
+            min_weight: float = 0.01,
+            initial_capital: float = 100_000.0,
+            risk_free_rate: float = 0.02,
+            rebalance_every: int = 4,
+            env_kwargs: Optional[Dict[str, Any]] = None,
+            ppo_kwargs: Optional[Dict[str, Any]] = None,
+            seed: Optional[int] = 42,
+            save: bool = False,
+            experiment_name: Optional[str] = None,
+    ) -> Tuple["OptimizationResult", "BacktestReport"]:
+        """Train PPO → extract weights → backtest. Mirrors ``run_and_backtest``."""
+        from app.ai.data_prep import load_and_prepare
+        from app.ai.trainer import PPOPortfolioTrainer
+        from app.ai.inference import PPOInference
+        from app.algorithms.hybrid_evo_optimizer import OptimizationResult
+        from pathlib import Path
+
+        if train_end is None or end_date is None:
+            raise ValueError("Both 'train_end' and 'end_date' are required.")
+
+        # 1. Prepare train data
+        split = load_and_prepare(
+            repo=self.repo,
+            tickers=tickers,
+            start_date=start_date or "2010-01-01",
+            end_date=train_end,
+            max_assets=max_assets,
+            train_frac=1.0,
+            val_frac=0.0,
+        )
+
+        # 2. Train
+        trainer = PPOPortfolioTrainer(
+            returns_df=split.train,
+            model_dir=model_dir,
+            env_kwargs=env_kwargs,
+            ppo_kwargs=ppo_kwargs,
+            seed=seed,
+        )
+        trainer.train(total_timesteps=total_timesteps, curriculum=curriculum)
+        model_path = str(Path(model_dir) / "final_model.zip")
+
+        # 3. Extract weights
+        inference = PPOInference(model_path=model_path, env_kwargs=env_kwargs or {})
+        weights = inference.get_final_weights(
+            returns_df=split.train,
+            top_n=top_n,
+            min_weight=min_weight,
+        )
+
+        # 4. Wrap into OptimizationResult
+        result = OptimizationResult(
+            weights=weights,
+            selected_assets=list(weights.keys()),
+            sharpe_ratio=0.0,
+            expected_return=0.0,
+            portfolio_risk=0.0,
+            n_generations=0,
+            history=[],
+        )
+
+        # 5. Backtest
+        spec = PortfolioSpec(name="PPO Strategy", weights=weights)
+        report = self.run_backtest(
+            portfolios=[spec],
+            start_date=train_end,
+            end_date=end_date,
+            initial_capital=initial_capital,
+            risk_free_rate=risk_free_rate,
+            rebalance_every=rebalance_every,
+        )
+
+        # 6. Persist
+        if save:
+            exp_name = experiment_name or f"PPO_{datetime.datetime.now():%Y%m%d_%H%M%S}"
+            bt_m = report.results[0].metrics if report.results else None
+            self.save_experiment(
+                name=exp_name,
+                algorithm="ppo",
+                parameters={
+                    "tickers": tickers,
+                    "start_date": start_date,
+                    "train_end": train_end,
+                    "end_date": end_date,
+                    "total_timesteps": total_timesteps,
+                    "top_n": top_n,
+                    "max_assets": max_assets,
+                    "rebalance_every": rebalance_every,
+                    "seed": seed,
+                },
+                metrics={
+                    "selected_assets": list(weights.keys()),
+                    "backtest": {
+                        "total_return": bt_m.total_return if bt_m else None,
+                        "cagr": bt_m.cagr if bt_m else None,
+                        "max_drawdown": bt_m.max_drawdown if bt_m else None,
+                        "sharpe_ratio": bt_m.sharpe_ratio if bt_m else None,
+                    },
+                },
+            )
+
+        logger.info("train_and_backtest_ppo complete.")
+        return result, report
+
+    # ══════════════════════════════════════════════════════════════════
     #  4. PLUGIN-BASED OPTIMISATION
     # ══════════════════════════════════════════════════════════════════
 
@@ -583,6 +790,25 @@ class PortfolioCore:
                 seed=seed,
             )
 
+        elif method == "ppo":
+            if model_path is None:
+                raise ValueError("model_path is required for method='ppo'")
+            weights = self.run_ppo_optimization(
+                model_path=model_path,
+                tickers=tickers,
+                start_date=start_date,
+                end_date=opt_end,
+            )
+            result = OptimizationResult(
+                weights=weights,
+                selected_assets=list(weights.keys()),
+                sharpe_ratio=0.0,
+                expected_return=0.0,
+                portfolio_risk=0.0,
+                n_generations=0,
+                history=[],
+            )
+
         elif method == "plugin":
             if plugin_name is None:
                 raise ValueError("plugin_name is required for method='plugin'")
@@ -605,8 +831,11 @@ class PortfolioCore:
             )
 
         else:
+
             raise ValueError(
-                f"Unknown method '{method}'. Choose from: 'evo', 'lstm', 'plugin'."
+
+                f"Unknown method '{method}'. Choose from: 'evo', 'lstm', 'ppo', 'plugin'."
+
             )
 
         # ── 2. Backtest ──────────────────────────────────────────────

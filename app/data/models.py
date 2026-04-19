@@ -1,9 +1,12 @@
 import datetime
+import logging
 import os
 from pathlib import Path
 from typing import List, Optional
 from sqlalchemy import String, Integer, Float, Date, ForeignKey, JSON, create_engine, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
+
+logger = logging.getLogger(__name__)
 
 # --- АБСОЛЮТНИЙ ШЛЯХ (FIX) ---
 # 1. Знаходимо, де лежить цей файл (app/data/models.py)
@@ -23,7 +26,7 @@ os.makedirs(DB_DIR, exist_ok=True)
 # 4. Шлях для SQLAlchemy
 DB_PATH = f"sqlite:///{DB_FILE}"
 
-print(f"DEBUG: Using Database at: {DB_PATH}")
+logger.debug("Using Database at: %s", DB_PATH)
 
 
 # -----------------------------
@@ -80,4 +83,4 @@ class Experiment(Base):
 def init_db():
     engine = create_engine(DB_PATH, echo=False)
     Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine)
+    return sessionmaker(engine)

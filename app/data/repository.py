@@ -90,7 +90,7 @@ class PortfolioRepository:
             if end_date:
                 query = query.where(Quote.date <= end_date)
 
-            df = pd.read_sql(query, session.bind)
+            df = pd.read_sql(query, session.connection())
 
         if df.empty:
             return pd.DataFrame()
@@ -116,7 +116,7 @@ class PortfolioRepository:
                 .where(Asset.ticker == ticker) \
                 .order_by(Quote.date)
 
-            df = pd.read_sql(query, session.bind)
+            df = pd.read_sql(query, session.connection())
 
             # Конвертуємо дати в datetime, щоб matplotlib зрозумів
             if not df.empty:

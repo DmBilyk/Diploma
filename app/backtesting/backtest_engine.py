@@ -244,6 +244,15 @@ class BacktestEngine:
         n_nan_before = int(df.isna().sum().sum())
         if n_nan_before > 0:
             df = df.ffill()
+            start_valid = df.iloc[0].notna()
+
+            if not start_valid.all():
+                dropped = df.columns[~start_valid].tolist()
+                logger.warning(
+                    "_load_prices: dropping %d tickers without стартової ціни: %s",
+                    len(dropped), dropped,
+                )
+                df = df.loc[:, start_valid]
             n_nan_after = int(df.isna().sum().sum())
             logger.warning(
                 "_load_prices: forward-filled %d NaN cells (%d remain)",

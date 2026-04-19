@@ -101,6 +101,9 @@ class DataEngine:
             return results
 
         # 2. Багато тікерів (MultiIndex)
+        if not isinstance(data.columns, pd.MultiIndex):
+            return results
+
         for ticker in requested_tickers:
             try:
                 if ticker in data.columns.levels[0]:
@@ -111,7 +114,7 @@ class DataEngine:
                         cleaned = self._clean_dataframe(df_ticker)
                         if not cleaned.empty:
                             results[ticker] = cleaned
-            except KeyError:
+            except (KeyError, AttributeError):
                 continue
 
         return results
@@ -143,8 +146,6 @@ class DataEngine:
         if 'Volume' in df.columns:
             df['Volume'] = df['Volume'].fillna(0)
 
-        # ❌ ВИДАЛЕНО: df = df.bfill()  <-- ЦЕ БУЛО ЗЛО
-        # Ми не маємо вигадувати дані в минулому!
 
         # Видаляємо NaN (тобто всі дати ДО моменту реального IPO)
         if 'Adj Close' in df.columns:  # Використовуємо Adj Close як критерій
