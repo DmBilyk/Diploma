@@ -33,6 +33,7 @@ from app.data.repository import PortfolioRepository
 from app.ui.widget.stock_chart_widget import StockChartWidget
 from app.ui.widget.optimizing_spinner import OptimizingSpinner
 from app.ui.widget.backtest_widget import BacktestWidget
+from app.ui.widget.optimization_widget import OptimizationWidget
 from app.core.core import PortfolioCore
 from app.ui.workers import DataSyncWorker
 
@@ -152,7 +153,7 @@ class MainWindow(QMainWindow):
 
         self._pages = QStackedWidget()
         self._pages.addWidget(self._build_market_page())
-        self._pages.addWidget(self._build_optimization_page())
+        self._pages.addWidget(OptimizationWidget(core=self.core))
         self._pages.addWidget(BacktestWidget(core=self.core))
         layout.addWidget(self._pages)
 
@@ -349,21 +350,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.market_stack, 1)
 
         self._load_tickers()
-        return page
-
-    def _build_optimization_page(self) -> QWidget:
-        """Optimization page — spinner placeholder."""
-        page = QWidget()
-        page.setStyleSheet(f"background-color: {_BG};")
-        layout = QVBoxLayout(page)
-
-        self.optimization_spinner = OptimizingSpinner(page)
-        layout.addWidget(self.optimization_spinner)
-
-        self.optimization_spinner.start(
-            "Optimizer not yet connected\nSelect Backtesting to run an analysis"
-        )
-
         return page
 
     # ─────────────────────────────────────────────────────────────────────────

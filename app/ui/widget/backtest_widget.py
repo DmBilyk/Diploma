@@ -15,13 +15,13 @@ app/ui/widgets/backtest_widget.py
 │  TopBar — «Comparison Backtest» + статус-badge                      │
 ├──────────────────┬──────────────────────────────────────────────────┤
 │  ControlPanel    │  ResultsStack                                     │
-│  (340 px fixed)  │   ├─ EmptyState  (до запуску)                    │
+│  (min 260 px)    │   ├─ EmptyState  (до запуску)                    │
 │  ─ Algorithms    │   ├─ SpinnerView (під час запуску)               │
-│  ─ Market        │   └─ ComparisonDashboard (після запуску)         │
-│  ─ Dates         │       ├─ MetricTable (рядки = алгоритми)         │
-│  ─ Parameters    │       ├─ PortfolioValueChart (всі серії)         │
-│  ─ [Run btn]     │       ├─ DrawdownChart                           │
-│                  │       └─ WeightsChart (для обраного алгоритму)   │
+│  ─ Plugins       │   └─ ComparisonDashboard (після запуску)         │
+│  ─ Benchmark     │       ├─ MetricTable (рядки = алгоритми)         │
+│  ─ Dates         │       ├─ PortfolioValueChart (всі серії)         │
+│  ─ Parameters    │       ├─ DrawdownChart                           │
+│  ─ [Run btn]     │       └─ WeightsChart (для обраного алгоритму)   │
 └──────────────────┴──────────────────────────────────────────────────┘
 """
 
@@ -36,7 +36,7 @@ import pandas as pd
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
-from PySide6.QtCore import Qt, QThread, Signal, QDate
+from PySide6.QtCore import Qt, QThread, Signal, QDate, QSize
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -72,12 +72,15 @@ logger = logging.getLogger(__name__)
 #  DESIGN TOKENS  (Fintech terminal palette)
 # ══════════════════════════════════════════════════════════════════════════════
 
-_BG      = "#0B0F19"
-_SURFACE = "#111827"
-_BORDER  = "#1F2937"
-_ACCENT  = "#F59E0B"   # amber — primary action / highlight
+_BG       = "#0B0F19"
+_SURFACE  = "#111827"
+_SURFACE2 = "#1A2235"
+_BORDER   = "#1F2937"
+_BORDER2  = "#2D3748"
+_ACCENT   = "#F59E0B"   # amber — primary action / highlight
 _TEXT_PRI = "#F9FAFB"
 _TEXT_SEC = "#6B7280"
+_TEXT_MUT = "#374151"
 _SUCCESS  = "#10B981"
 _DANGER   = "#F43F5E"
 _BG1      = _BG        # alias used in legacy references
@@ -92,8 +95,8 @@ _SERIES_COLORS = [
     "#34D399",  # teal
 ]
 
-# Keep compat aliases for equal-weight benchmark
 _ORANGE = "#94A3B8"  # muted slate for benchmark line
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  MATPLOTLIB КАНВАС
@@ -106,6 +109,165 @@ class _ThemeAwareCanvas(FigureCanvas):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.figure.patch.set_facecolor(_BG)
         self.setStyleSheet(f"background-color: {_BG};")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TOGGLE CARD  — QFrame з нормальним layout (без paintEvent)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _ToggleCard(QFrame):
+    """
+    Клікабельна картка-перемикач для вибору алгоритму.
+    QFrame + QHBoxLayout з QLabel — без жодного paintEvent.
+    """
+    toggled = Signal(bool)
+
+    def __init__(
+        self,
+        title: str,
+        subtitle: str,
+        color: str,
+        checked: bool = True,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("toggleCard")
+        self._color   = color
+        self._checked = checked
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(54)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        # ── Layout ────────────────────────────────────────────────────────────
+        row = QHBoxLayout(self)
+        row.setContentsMargins(12, 8, 12, 8)
+        row.setSpacing(8)
+
+        # Текстовий блок (назва + підзаголовок)
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+        text_col.setContentsMargins(0, 0, 0, 0)
+
+        self._title_lbl = QLabel(title)
+        self._sub_lbl   = QLabel(subtitle)
+        self._title_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._sub_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        text_col.addWidget(self._title_lbl)
+        text_col.addWidget(self._sub_lbl)
+        row.addLayout(text_col, 1)
+
+        # Галочка праворуч
+        self._check_lbl = QLabel("✓")
+        self._check_lbl.setFixedSize(18, 18)
+        self._check_lbl.setAlignment(Qt.AlignCenter)
+        row.addWidget(self._check_lbl)
+
+        self._refresh_style()
+
+    # ── Стан ──────────────────────────────────────────────────────────────────
+
+    def isChecked(self) -> bool:
+        return self._checked
+
+    def setChecked(self, val: bool) -> None:
+        self._checked = val
+        self._refresh_style()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self._checked = not self._checked
+            self._refresh_style()
+            self.toggled.emit(self._checked)
+        super().mousePressEvent(event)
+
+    # ── Стилі ─────────────────────────────────────────────────────────────────
+
+    def _refresh_style(self) -> None:
+        on  = self._checked
+        rgb = self._hex_to_rgb(self._color)
+        bg      = f"rgba({rgb}, 0.10)" if on else _SURFACE
+        border  = self._color          if on else _BORDER
+
+        # Стиль рамки — через objectName щоб не лізти в дочірні віджети
+        self.setStyleSheet(f"""
+            QFrame#toggleCard {{
+                background-color: {bg};
+                border: 1px solid {border};
+                border-left: 3px solid {self._color};
+                border-radius: 6px;
+            }}
+            QFrame#toggleCard:hover {{
+                background-color: rgba({rgb}, 0.16);
+                border-color: {self._color};
+            }}
+            QLabel {{ background: transparent; border: none; }}
+        """)
+
+        title_color = _TEXT_PRI if on else _TEXT_SEC
+        sub_color   = _TEXT_SEC if on else _TEXT_MUT
+        chk_color   = self._color if on else "transparent"
+
+        self._title_lbl.setStyleSheet(
+            f"color: {title_color}; font-size: 11px; font-weight: 700;"
+        )
+        self._sub_lbl.setStyleSheet(
+            f"color: {sub_color}; font-size: 9px;"
+        )
+        self._check_lbl.setStyleSheet(
+            f"color: {chk_color}; font-size: 12px; font-weight: 700;"
+        )
+
+    @staticmethod
+    def _hex_to_rgb(hex_color: str) -> str:
+        h = hex_color.lstrip("#")
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        return f"{r},{g},{b}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  PLUGIN SELECTOR  — окремий блок для плагінів
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _PluginSelector(QWidget):
+    """
+    Блок вибору плагіну: список плагінів як toggle-картки.
+    Якщо плагінів немає — показує плейсхолдер.
+    """
+
+    def __init__(self, plugin_names: list[str], color: str,
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._color   = color
+        self._cards: list[_ToggleCard] = []
+        lyt = QVBoxLayout(self)
+        lyt.setContentsMargins(0, 0, 0, 0)
+        lyt.setSpacing(4)
+
+        if not plugin_names:
+            placeholder = QLabel("No plugins found in app/plugins/")
+            placeholder.setStyleSheet(f"""
+                color: {_TEXT_MUT};
+                font-size: 10px;
+                font-style: italic;
+                border: 1px dashed {_BORDER};
+                border-radius: 6px;
+                padding: 10px 14px;
+            """)
+            lyt.addWidget(placeholder)
+        else:
+            for name in plugin_names:
+                card = _ToggleCard(
+                    title=name,
+                    subtitle="Custom plugin · BaseOptimizer",
+                    color=color,
+                    checked=False,
+                )
+                self._cards.append(card)
+                lyt.addWidget(card)
+
+    def selected_plugins(self) -> list[str]:
+        return [c._title for c in self._cards if c.isChecked()]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -122,57 +284,54 @@ class _ControlPanel(QScrollArea):
     def __init__(self, core: PortfolioCore, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._core = core
-        self.setFixedWidth(300)
+        self.setMinimumWidth(260)
+        self.setMaximumWidth(320)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setFrameShape(QFrame.NoFrame)
         self.setStyleSheet(f"""
             QScrollArea {{ background: {_SURFACE}; border: none; }}
-            QWidget {{ background: {_SURFACE}; color: {_TEXT_PRI}; }}
+            QWidget#inner {{ background: {_SURFACE}; }}
             QLabel {{
                 color: {_TEXT_PRI};
                 font-size: 11px;
+                background: transparent;
             }}
             QGroupBox {{
-                border: 1px solid {_BORDER};
-                border-radius: 4px;
-                margin-top: 4px;
-                padding-top: 4px;
-            }}
-            QCheckBox {{ color: {_TEXT_PRI}; font-size: 11px; spacing: 6px; }}
-            QCheckBox::indicator {{
-                width: 14px; height: 14px;
-                border: 1px solid {_BORDER};
-                border-radius: 3px;
-                background: {_BG};
-            }}
-            QCheckBox::indicator:checked {{
-                background: {_ACCENT};
-                border-color: {_ACCENT};
+                border: none;
+                margin-top: 0px;
+                padding-top: 0px;
             }}
             QSpinBox, QDoubleSpinBox, QDateEdit, QComboBox {{
                 background: {_BG};
                 color: {_TEXT_PRI};
                 border: 1px solid {_BORDER};
-                border-radius: 3px;
-                padding: 3px 6px;
+                border-radius: 4px;
+                padding: 4px 6px;
                 font-size: 11px;
             }}
-            QSpinBox:focus, QDoubleSpinBox:focus, QDateEdit:focus {{
+            QSpinBox:focus, QDoubleSpinBox:focus, QDateEdit:focus, QComboBox:focus {{
                 border-color: {_ACCENT};
             }}
-            QComboBox::drop-down {{ border: none; }}
+            QComboBox::drop-down {{ border: none; width: 18px; }}
+            QComboBox::down-arrow {{
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid {_TEXT_SEC};
+                margin-right: 6px;
+            }}
             QScrollBar:vertical {{
                 border: none; width: 4px; background: {_BG};
             }}
             QScrollBar::handle:vertical {{
-                background: {_BORDER}; border-radius: 2px; min-height: 20px;
+                background: {_BORDER2}; border-radius: 2px; min-height: 20px;
             }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
         """)
 
         self._inner = QWidget()
-
+        self._inner.setObjectName("inner")
         self.setWidget(self._inner)
         self.setWidgetResizable(True)
         self._build_inner()
@@ -181,91 +340,62 @@ class _ControlPanel(QScrollArea):
 
     def _build_inner(self) -> None:
         lyt = QVBoxLayout(self._inner)
-        lyt.setContentsMargins(14, 16, 14, 16)
-        lyt.setSpacing(14)
+        lyt.setContentsMargins(12, 16, 12, 16)
+        lyt.setSpacing(16)
 
-        # ── 1. Algorithms ──────────────────────────────────────────────────
+        # ── 1. Алгоритми ──────────────────────────────────────────────────
         lyt.addWidget(self._section_label("ALGORITHMS"))
 
-        algo_box = QGroupBox()
+        self._card_hybrid = _ToggleCard(
+            title="Hybrid Evo",
+            subtitle="GA + SLSQP + Local Search",
+            color=_SERIES_COLORS[0],
+            checked=True,
+        )
+        self._card_markowitz = _ToggleCard(
+            title="Markowitz",
+            subtitle="Mean-Variance (MPT)",
+            color=_SERIES_COLORS[1],
+            checked=True,
+        )
+        lyt.addWidget(self._card_hybrid)
+        lyt.addWidget(self._card_markowitz)
 
-        algo_lyt = QVBoxLayout(algo_box)
-        algo_lyt.setSpacing(6)
-        algo_lyt.setContentsMargins(10, 8, 10, 8)
+        # ── 2. Плагіни ────────────────────────────────────────────────────
+        lyt.addWidget(self._section_label("PLUGINS"))
 
-        self._cb_hybrid    = self._make_checkbox("Hybrid Evo  (GA + SLSQP)",      _SERIES_COLORS[0], checked=True)
-        self._cb_markowitz = self._make_checkbox("Markowitz  (Mean-Variance)",     _SERIES_COLORS[1], checked=True)
-
-        # Плагіни — динамічний список
-        # Отримуємо доступні плагіни через ядро
-        algo_lyt.addWidget(self._cb_hybrid)
-        algo_lyt.addWidget(self._cb_markowitz)
-
-        # Отримуємо доступні плагіни через ядро
         try:
-            plugins_dict = self._core.get_plugins()
-            plugin_names = list(plugins_dict.keys())
-        except Exception as e:
-            logger.warning(f"Не вдалося завантажити плагіни: {e}")
+            plugins_dict  = self._core.get_plugins()
+            plugin_names  = list(plugins_dict.keys())
+        except Exception as exc:
+            logger.warning("Could not load plugins: %s", exc)
             plugin_names = []
 
-        if plugin_names:
-            # Розділювач
-            sep = QFrame()
-            sep.setFrameShape(QFrame.HLine)
-            sep.setStyleSheet("color: palette(mid); margin-top: 4px; margin-bottom: 4px;")
-            algo_lyt.addWidget(sep)
+        self._plugin_selector = _PluginSelector(plugin_names, _SERIES_COLORS[3])
+        lyt.addWidget(self._plugin_selector)
 
-            # Горизонтальний контейнер для плагіна
-            plugin_lyt = QHBoxLayout()
-            plugin_lyt.setContentsMargins(0, 0, 0, 0)
-            plugin_lyt.setSpacing(8)
-
-            # Чекбокс активації плагіна
-            self._cb_plugin = self._make_checkbox("Plugin:", _SERIES_COLORS[3], checked=False)
-            plugin_lyt.addWidget(self._cb_plugin)
-
-            # Випадаючий список (розгорткове меню)
-            self._combo_plugin = QComboBox()
-            self._combo_plugin.addItems(plugin_names)
-
-            self._combo_plugin.setEnabled(False)  # Вимкнений за замовчуванням
-
-            # Активуємо список лише коли стоїть галочка
-            self._cb_plugin.toggled.connect(self._combo_plugin.setEnabled)
-
-            plugin_lyt.addWidget(self._combo_plugin, 1)
-            algo_lyt.addLayout(plugin_lyt)
-        else:
-            self._cb_plugin = None
-            self._combo_plugin = None
-
-        lyt.addWidget(algo_box)
-
-        # ── 2. Benchmark ───────────────────────────────────────────────────
+        # ── 3. Бенчмарк ───────────────────────────────────────────────────
         lyt.addWidget(self._section_label("BENCHMARK"))
 
-        bench_box = QGroupBox()
+        self._card_ew = _ToggleCard(
+            title="Equal-Weight",
+            subtitle="Naive 1/N diversification",
+            color=_ORANGE,
+            checked=True,
+        )
+        lyt.addWidget(self._card_ew)
 
-        bench_lyt = QVBoxLayout(bench_box)
-        bench_lyt.setSpacing(6)
-        bench_lyt.setContentsMargins(10, 8, 10, 8)
-
-        self._cb_equal_weight = self._make_checkbox("Equal-Weight", _ORANGE, checked=True)
-
-        bench_lyt.addWidget(self._cb_equal_weight)
-        lyt.addWidget(bench_box)
-
-        # ── 3. Date range ──────────────────────────────────────────────────
+        # ── 4. Діапазон дат ───────────────────────────────────────────────
         lyt.addWidget(self._section_label("DATE RANGE"))
 
         date_grid = QGridLayout()
         date_grid.setSpacing(6)
         date_grid.setContentsMargins(0, 0, 0, 0)
+        date_grid.setColumnStretch(0, 1)
+        date_grid.setColumnStretch(1, 1)
 
         date_grid.addWidget(self._field_label("Train Start"), 0, 0)
         date_grid.addWidget(self._field_label("Train End"),   0, 1)
-
         self._train_start = self._make_date("2015-01-01")
         self._train_end   = self._make_date("2019-12-31")
         date_grid.addWidget(self._train_start, 1, 0)
@@ -273,7 +403,6 @@ class _ControlPanel(QScrollArea):
 
         date_grid.addWidget(self._field_label("Backtest Start"), 2, 0)
         date_grid.addWidget(self._field_label("Backtest End"),   2, 1)
-
         self._bt_start = self._make_date("2020-01-01")
         self._bt_end   = self._make_date("2025-01-01")
         date_grid.addWidget(self._bt_start, 3, 0)
@@ -281,15 +410,17 @@ class _ControlPanel(QScrollArea):
 
         lyt.addLayout(date_grid)
 
-        # ── 4. Algorithm parameters ────────────────────────────────────────
+        # ── 5. Параметри ─────────────────────────────────────────────────
         lyt.addWidget(self._section_label("PARAMETERS"))
 
         params_grid = QGridLayout()
         params_grid.setSpacing(6)
         params_grid.setContentsMargins(0, 0, 0, 0)
+        params_grid.setColumnStretch(0, 1)
+        params_grid.setColumnStretch(1, 1)
 
-        params_grid.addWidget(self._field_label("Population"),    0, 0)
-        params_grid.addWidget(self._field_label("Generations"),   0, 1)
+        params_grid.addWidget(self._field_label("Population"),   0, 0)
+        params_grid.addWidget(self._field_label("Generations"),  0, 1)
         self._pop_size = self._make_spin(50, 500, 150, step=50)
         self._n_gen    = self._make_spin(50, 500, 150, step=50)
         params_grid.addWidget(self._pop_size, 1, 0)
@@ -302,8 +433,8 @@ class _ControlPanel(QScrollArea):
         params_grid.addWidget(self._max_k, 3, 0)
         params_grid.addWidget(self._rfr,   3, 1)
 
-        params_grid.addWidget(self._field_label("Capital ($)"),       4, 0)
-        params_grid.addWidget(self._field_label("Rebalance (weeks)"), 4, 1)
+        params_grid.addWidget(self._field_label("Capital ($)"),        4, 0)
+        params_grid.addWidget(self._field_label("Rebalance (weeks)"),  4, 1)
         self._capital   = self._make_dspin(10_000, 10_000_000, 100_000,
                                            decimals=0, step=10_000)
         self._rebalance = self._make_spin(1, 52, 4)
@@ -312,31 +443,31 @@ class _ControlPanel(QScrollArea):
 
         lyt.addLayout(params_grid)
 
-        # ── 5. Run button ──────────────────────────────────────────────────
-        lyt.addSpacing(8)
-        self.btn_run = QPushButton("Run Comparison")
-        self.btn_run.setFixedHeight(40)
+        # ── 6. Кнопка Run ─────────────────────────────────────────────────
+        lyt.addSpacing(4)
+        self.btn_run = QPushButton("▶  Run Comparison")
+        self.btn_run.setMinimumHeight(42)
+        self.btn_run.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_run.setStyleSheet(f"""
             QPushButton {{
                 background-color: {_ACCENT};
                 color: #0B0F19;
                 border: none;
-                border-radius: 4px;
+                border-radius: 6px;
                 font-size: 12px;
                 font-weight: 700;
                 letter-spacing: 0.5px;
-                padding: 8px;
+                padding: 10px;
             }}
             QPushButton:hover   {{ background-color: #FBBF24; }}
             QPushButton:pressed {{ background-color: #D97706; }}
             QPushButton:disabled {{
-                background-color: rgba(245,158,11,0.25);
-                color: rgba(11,15,25,0.5);
+                background-color: rgba(245,158,11,0.20);
+                color: rgba(11,15,25,0.4);
             }}
         """)
         self.btn_run.clicked.connect(self._on_run)
         lyt.addWidget(self.btn_run)
-
         lyt.addStretch()
 
     # ── Слот ─────────────────────────────────────────────────────────────────
@@ -346,20 +477,19 @@ class _ControlPanel(QScrollArea):
             return qd.toString("yyyy-MM-dd")
 
         algorithms: List[str] = []
-        if self._cb_hybrid.isChecked():
+        if self._card_hybrid.isChecked():
             algorithms.append("hybrid_evo")
-        if self._cb_markowitz.isChecked():
+        if self._card_markowitz.isChecked():
             algorithms.append("markowitz")
-        if getattr(self, "_cb_plugin", None) and self._cb_plugin.isChecked():
-            selected_plugin = self._combo_plugin.currentText()
-            algorithms.append(f"plugin:{selected_plugin}")
+        for plugin_name in self._plugin_selector.selected_plugins():
+            algorithms.append(f"plugin:{plugin_name}")
 
         benchmarks: List[str] = []
-        if self._cb_equal_weight.isChecked():
+        if self._card_ew.isChecked():
             benchmarks.append("equal_weight")
 
         if not algorithms and not benchmarks:
-            return  # Нічого не вибрано
+            return
 
         params = dict(
             algorithms      = algorithms,
@@ -368,7 +498,6 @@ class _ControlPanel(QScrollArea):
             train_end       = qs(self._train_end.date()),
             backtest_start  = qs(self._bt_start.date()),
             backtest_end    = qs(self._bt_end.date()),
-            # Для сумісності з BacktestWorker (він очікує ці ключі)
             method          = algorithms[0].replace("hybrid_evo", "evo") if algorithms else "evo",
             start_date      = qs(self._train_start.date()),
             end_date        = qs(self._bt_end.date()),
@@ -389,43 +518,24 @@ class _ControlPanel(QScrollArea):
         lbl.setStyleSheet(f"""
             color: {_TEXT_SEC};
             font-size: 9px;
-            font-weight: 600;
-            letter-spacing: 1.2px;
+            font-weight: 700;
+            letter-spacing: 1.5px;
             padding-bottom: 2px;
+            background: transparent;
         """)
         return lbl
 
     @staticmethod
     def _field_label(text: str) -> QLabel:
         lbl = QLabel(text)
-        lbl.setStyleSheet(f"color: {_TEXT_SEC}; font-size: 10px;")
+        lbl.setStyleSheet(f"color: {_TEXT_SEC}; font-size: 10px; background: transparent;")
         return lbl
-
-    @staticmethod
-    def _make_checkbox(text: str, color: str, checked: bool = True) -> QCheckBox:
-        cb = QCheckBox(text)
-        cb.setChecked(checked)
-        cb.setStyleSheet(f"""
-            QCheckBox {{ color: {color}; font-size: 11px; font-weight: 600; spacing: 6px; }}
-            QCheckBox::indicator {{
-                width: 14px; height: 14px;
-                border: 1px solid {_BORDER};
-                border-radius: 3px;
-                background: {_BG};
-            }}
-            QCheckBox::indicator:checked {{
-                background: {color};
-                border-color: {color};
-            }}
-        """)
-        return cb
 
     def _make_date(self, iso: str) -> QDateEdit:
         w = QDateEdit()
         w.setCalendarPopup(True)
         w.setDate(QDate.fromString(iso, "yyyy-MM-dd"))
         w.setDisplayFormat("yyyy-MM-dd")
-
         return w
 
     @staticmethod
@@ -434,7 +544,6 @@ class _ControlPanel(QScrollArea):
         w.setRange(lo, hi)
         w.setValue(val)
         w.setSingleStep(step)
-
         return w
 
     @staticmethod
@@ -449,7 +558,6 @@ class _ControlPanel(QScrollArea):
             w.setSuffix(suffix)
         if step is not None:
             w.setSingleStep(step)
-
         return w
 
 
@@ -461,7 +569,7 @@ class _MetricsTable(QTableWidget):
     """Компактна таблиця порівняння метрик усіх алгоритмів."""
 
     _COLUMNS = ["Algorithm", "Start ($)", "End ($)", "Return",
-                "CAGR", "Volatility", "Max Drawdown", "Sharpe"]
+                "CAGR", "Volatility", "Max Drawdown", "Sharpe", "Sortino"]
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(0, len(self._COLUMNS), parent)
@@ -474,16 +582,19 @@ class _MetricsTable(QTableWidget):
         self.verticalHeader().setVisible(False)
         self.horizontalHeader().setStretchLastSection(True)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.setFixedHeight(150)
+        # Мінімальна висота замість фіксованої — масштабується разом з вікном
+        self.setMinimumHeight(80)
+        self.setMaximumHeight(200)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.setStyleSheet(f"""
             QTableWidget {{
                 background-color: {_SURFACE};
                 color: {_TEXT_PRI};
                 border: 1px solid {_BORDER};
-                border-radius: 4px;
+                border-radius: 6px;
                 font-size: 11px;
                 gridline-color: {_BORDER};
-                selection-background-color: rgba(245,158,11,0.12);
+                selection-background-color: rgba(245,158,11,0.10);
                 selection-color: {_TEXT_PRI};
             }}
             QTableWidget::item {{ padding: 5px 10px; border: none; }}
@@ -495,16 +606,12 @@ class _MetricsTable(QTableWidget):
                 border-bottom: 1px solid {_BORDER};
                 padding: 5px 10px;
                 font-size: 9px;
-                font-weight: 600;
+                font-weight: 700;
                 letter-spacing: 0.8px;
-                text-transform: uppercase;
             }}
         """)
 
-
-
     def populate(self, rows: list[dict]) -> None:
-        """rows: список словників з ключами _COLUMNS (англ. назви → вже форматовані значення)."""
         self.setRowCount(len(rows))
         for row_idx, row_data in enumerate(rows):
             color = row_data.get("_color", "#888888")
@@ -517,17 +624,22 @@ class _MetricsTable(QTableWidget):
                 row_data.get("volatility", "—"),
                 row_data.get("max_drawdown", "—"),
                 row_data.get("sharpe", "—"),
+                row_data.get("sortino", "—"),
             ]
             for col_idx, val in enumerate(values):
                 item = QTableWidgetItem(val)
                 item.setTextAlignment(Qt.AlignCenter)
                 if col_idx == 0:
-                    # Назва алгоритму — кольорова
                     item.setForeground(QColor(color))
                     font = QFont()
                     font.setBold(True)
                     item.setFont(font)
                 self.setItem(row_idx, col_idx, item)
+        # Підганяємо висоту таблиці під кількість рядків
+        row_h = self.rowHeight(0) if rows else 28
+        header_h = self.horizontalHeader().height()
+        needed = header_h + row_h * len(rows) + 4
+        self.setMaximumHeight(max(80, min(needed, 200)))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -537,87 +649,108 @@ class _MetricsTable(QTableWidget):
 class _ComparisonDashboard(QWidget):
     """Рендерить таблицю метрик + три matplotlib-графіки для N алгоритмів."""
 
-    # Алгоритм, ваги якого показуються в WeightsChart
     _selected_algo_idx: int = 0
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setStyleSheet(f"background-color: {_BG};")
-        self._series: list[dict] = []  # [{name, color, equity, weights}, ...]
+        self._series: list[dict] = []
         self._build_ui()
-
-    # ── Побудова ─────────────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(20, 14, 20, 14)
-        root.setSpacing(12)
+        root.setContentsMargins(16, 12, 16, 12)
+        root.setSpacing(10)
 
         # Таблиця
         self._table = _MetricsTable()
         root.addWidget(self._table)
 
         # Верхній графік — вартість
-        self._fig_main = Figure(figsize=(9, 3.4), dpi=100)
+        self._fig_main = Figure(dpi=100)
         self._canvas_main = _ThemeAwareCanvas(self._fig_main)
-        root.addWidget(self._canvas_main, 3)
+        self._canvas_main.setMinimumHeight(180)
+        root.addWidget(self._canvas_main, 4)
 
-        # Нижній рядок — просадка + ваги (з перемикачем алгоритму)
+        # ── Нижній рядок: Drawdown (ліво) + Weights (право) ──────────────────
         bottom_row = QHBoxLayout()
-        bottom_row.setSpacing(12)
+        bottom_row.setSpacing(10)
 
-        self._fig_dd = Figure(figsize=(4.5, 2.6), dpi=100)
+        # Лівий блок — Drawdown
+        self._fig_dd = Figure(dpi=100)
         self._canvas_dd = _ThemeAwareCanvas(self._fig_dd)
+        self._canvas_dd.setMinimumHeight(150)
         bottom_row.addWidget(self._canvas_dd, 1)
 
-        # Права панель: перемикач алгоритму + графік ваг
-        right_col = QVBoxLayout()
-        right_col.setSpacing(6)
+        # Правий блок — заголовок з selector + canvas weights
+        # Структура: QWidget > QVBoxLayout > [header_row, canvas]
+        right_container = QWidget()
+        right_container.setStyleSheet(f"background: {_BG};")
+        right_vbox = QVBoxLayout(right_container)
+        right_vbox.setContentsMargins(0, 0, 0, 0)
+        right_vbox.setSpacing(4)
+
+        # Рядок заголовку: "Weights:" label + combobox
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(6)
+
+        weights_lbl = QLabel("Weights:")
+        weights_lbl.setStyleSheet(f"color: {_TEXT_SEC}; font-size: 10px; background: transparent;")
+        weights_lbl.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        header_row.addWidget(weights_lbl)
 
         self._weights_selector = QComboBox()
-
+        self._weights_selector.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._weights_selector.setMaximumHeight(26)
+        self._weights_selector.setStyleSheet(f"""
+            QComboBox {{
+                background: {_SURFACE};
+                color: {_TEXT_PRI};
+                border: 1px solid {_BORDER};
+                border-radius: 4px;
+                padding: 2px 6px;
+                font-size: 11px;
+            }}
+            QComboBox:focus {{ border-color: {_ACCENT}; }}
+            QComboBox::drop-down {{ border: none; width: 16px; }}
+        """)
         self._weights_selector.currentIndexChanged.connect(self._on_weights_algo_changed)
-        right_col.addWidget(self._weights_selector)
+        header_row.addWidget(self._weights_selector, 1)
 
-        self._fig_w = Figure(figsize=(4.5, 2.4), dpi=100)
+        right_vbox.addLayout(header_row)
+
+        # Canvas weights — займає весь простір що залишився
+        self._fig_w = Figure(dpi=100)
         self._canvas_w = _ThemeAwareCanvas(self._fig_w)
-        right_col.addWidget(self._canvas_w)
+        self._canvas_w.setMinimumHeight(130)
+        right_vbox.addWidget(self._canvas_w, 1)
 
-        bottom_row.addLayout(right_col, 1)
-        root.addLayout(bottom_row, 2)
+        bottom_row.addWidget(right_container, 1)
+        root.addLayout(bottom_row, 3)
 
     # ── Публічний API ─────────────────────────────────────────────────────────
 
     def render(self, series_list: list[dict]) -> None:
-        """
-        series_list: [{
-            name: str,
-            color: str,
-            equity: pd.Series,
-            weights: dict[str, float],  # {} для бенчмарків без ваг
-            metrics: dict               # total_return, cagr, volatility, max_dd, sharpe
-        }]
-        """
         self._series = series_list
 
-        # Таблиця
         table_rows = []
         for s in series_list:
             m = s.get("metrics", {})
             table_rows.append({
-                "_color":      s["color"],
-                "name":        s["name"],
-                "start":       f"${s['equity'].iloc[0]:,.0f}",
-                "finish":      f"${s['equity'].iloc[-1]:,.0f}",
+                "_color":       s["color"],
+                "name":         s["name"],
+                "start":        f"${s['equity'].iloc[0]:,.0f}",
+                "finish":       f"${s['equity'].iloc[-1]:,.0f}",
                 "total_return": f"{m.get('total_return', 0):+.2%}",
-                "cagr":        f"{m.get('cagr', 0):.2%}",
-                "volatility":  f"{m.get('volatility', 0):.2%}",
+                "cagr":         f"{m.get('cagr', 0):.2%}",
+                "volatility":   f"{m.get('volatility', 0):.2%}",
                 "max_drawdown": f"{m.get('max_dd', 0):.2%}",
-                "sharpe":      f"{m.get('sharpe', 0):.2f}",
+                "sharpe":       f"{m.get('sharpe', 0):.2f}",
+                "sortino":      f"{m.get('sortino', 0):.2f}",
             })
         self._table.populate(table_rows)
 
-        # Перемикач ваг — лише ті алгоритми, що мають weights
         self._weights_selector.blockSignals(True)
         self._weights_selector.clear()
         for s in series_list:
@@ -626,7 +759,6 @@ class _ComparisonDashboard(QWidget):
         self._weights_selector.blockSignals(False)
         self._selected_algo_idx = 0
 
-        # Графіки
         self._draw_equity()
         self._draw_drawdown()
         self._draw_weights(self._get_selected_weights_series())
@@ -647,7 +779,6 @@ class _ComparisonDashboard(QWidget):
     # ── Графік 1: Вартість ────────────────────────────────────────────────────
 
     def _get_theme_colors(self):
-        # Fixed fintech dark theme — always the same regardless of OS palette
         return _TEXT_PRI, _BORDER, _BG
 
     def _draw_equity(self) -> None:
@@ -679,13 +810,12 @@ class _ComparisonDashboard(QWidget):
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
         ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.8, color=grid_color)
-        ax.legend(
-            loc="upper left", framealpha=0.3,
-            fontsize=9, labelcolor="linecolor",
-            facecolor=bg_color, edgecolor=grid_color,
-        )
-
-        fig.tight_layout(pad=1.2)
+        ax.legend(loc="upper left", framealpha=0.3, fontsize=9,
+                  labelcolor="linecolor", facecolor=bg_color, edgecolor=grid_color)
+        try:
+            fig.tight_layout(pad=1.2)
+        except Exception:
+            fig.subplots_adjust(left=0.10, right=0.88, top=0.90, bottom=0.12)
         self._canvas_main.draw()
 
     # ── Графік 2: Просадка ────────────────────────────────────────────────────
@@ -699,7 +829,7 @@ class _ComparisonDashboard(QWidget):
 
         for s in self._series:
             if s.get("is_benchmark"):
-                continue  # Бенчмарк не показуємо в просадці
+                continue
             eq = s["equity"]
             dd = (eq / eq.cummax() - 1) * 100
             ax.plot(dd.index, dd, color=s["color"], lw=1.5, label=s["name"])
@@ -717,8 +847,10 @@ class _ComparisonDashboard(QWidget):
         ax.grid(True, linestyle="--", linewidth=0.4, alpha=0.8, color=grid_color)
         ax.legend(loc="lower left", framealpha=0.3, fontsize=8,
                   facecolor=bg_color, edgecolor=grid_color)
-
-        fig.tight_layout(pad=1.0)
+        try:
+            fig.tight_layout(pad=0.8)
+        except Exception:
+            fig.subplots_adjust(left=0.12, right=0.97, top=0.88, bottom=0.14)
         self._canvas_dd.draw()
 
     # ── Графік 3: Ваги ────────────────────────────────────────────────────────
@@ -734,43 +866,41 @@ class _ComparisonDashboard(QWidget):
             ax.text(0.5, 0.5, "No weight data available",
                     ha="center", va="center", color=grid_color, fontsize=10,
                     transform=ax.transAxes)
-            fig.tight_layout(pad=1.0)
+            try:
+                fig.tight_layout(pad=0.8)
+            except Exception:
+                pass
             self._canvas_w.draw()
             return
 
-        color = series["color"]
+        color   = series["color"]
         weights = series["weights"]
-        top = dict(sorted(weights.items(), key=lambda x: x[1], reverse=True)[:15])
-        labels = list(top.keys())
-        values = [v * 100 for v in top.values()]
+        top     = dict(sorted(weights.items(), key=lambda x: x[1], reverse=True)[:15])
+        labels  = list(top.keys())
+        values  = [v * 100 for v in top.values()]
 
-        n = len(labels)
+        n    = len(labels)
         bars = ax.barh(labels, values, color=color,
                        alpha=0.85, edgecolor=bg_color, linewidth=0.5)
         for bar, val in zip(bars, values):
-            ax.text(
-                bar.get_width() + 0.4,
-                bar.get_y() + bar.get_height() / 2,
-                f"{val:.1f}%",
-                va="center", ha="left", fontsize=7.5, color=text_color,
-            )
+            ax.text(bar.get_width() + 0.4,
+                    bar.get_y() + bar.get_height() / 2,
+                    f"{val:.1f}%",
+                    va="center", ha="left", fontsize=7.5, color=text_color)
 
         ax.invert_yaxis()
-        ax.set_title(
-            f"Weights: {series['name']}  (Top {min(n, 15)})",
-            color=text_color, fontsize=10, fontweight="600", pad=8, loc="left"
-        )
+        # Заголовок прибрано — він тепер у header_row зверху (QLabel + QComboBox)
         ax.xaxis.set_major_formatter(lambda x, _: f"{x:.0f}%")
         ax.tick_params(axis="y", labelsize=7.5)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-        ax.margins(x=0.1)
+        ax.margins(x=0.12)
         ax.grid(True, axis="x", linestyle="--", linewidth=0.4, alpha=0.8, color=grid_color)
-
-        fig.tight_layout(pad=1.0)
+        try:
+            fig.tight_layout(pad=0.6)
+        except Exception:
+            fig.subplots_adjust(left=0.30, right=0.88, top=0.96, bottom=0.08)
         self._canvas_w.draw()
-
-    # ── Хелпер ───────────────────────────────────────────────────────────────
 
     @staticmethod
     def _style_ax(ax, text_color, grid_color, bg_color) -> None:
@@ -795,15 +925,18 @@ class _EmptyState(QWidget):
 
         title = QLabel("No Analysis Run Yet")
         title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet(f"color: {_TEXT_PRI}; font-size: 18px; font-weight: 700; letter-spacing: 0.3px;")
+        title.setStyleSheet(f"color: {_TEXT_PRI}; font-size: 18px; font-weight: 700;"
+                            f" letter-spacing: 0.3px; background: transparent;")
 
         subtitle = QLabel("Select algorithms on the left and click  Run Comparison")
         subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setStyleSheet(f"color: {_TEXT_SEC}; font-size: 12px; padding-top: 6px;")
+        subtitle.setStyleSheet(f"color: {_TEXT_SEC}; font-size: 12px; padding-top: 6px;"
+                               f" background: transparent;")
 
         hint = QLabel("Supports:  Hybrid Evo  ·  Markowitz  ·  Plugins  ·  Equal-Weight Benchmark")
         hint.setAlignment(Qt.AlignCenter)
-        hint.setStyleSheet(f"color: {_BORDER}; font-size: 10px; padding-top: 4px;")
+        hint.setStyleSheet(f"color: {_BORDER2}; font-size: 10px; padding-top: 4px;"
+                           f" background: transparent;")
 
         for w in (title, subtitle, hint):
             lyt.addWidget(w)
@@ -816,7 +949,6 @@ class _EmptyState(QWidget):
 class _SpinnerView(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-
         lyt = QVBoxLayout(self)
         lyt.setAlignment(Qt.AlignCenter)
         self._spinner = OptimizingSpinner(self)
@@ -843,19 +975,15 @@ class _MultiBacktestWorker(QThread):
     Запускає N алгоритмів послідовно, емітує серіалізований список серій.
     Signals:
         progress_updated(int, str)
-        finished(list[dict])  — список series_dict для _ComparisonDashboard.render()
+        finished(list[dict])
         error(str)
     """
     progress_updated = Signal(int, str)
     finished         = Signal(list)
     error            = Signal(str)
 
-    def __init__(
-        self,
-        core: PortfolioCore,
-        params: dict,
-        parent: QWidget | None = None,
-    ) -> None:
+    def __init__(self, core: PortfolioCore, params: dict,
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._core   = core
         self._params = params
@@ -892,20 +1020,16 @@ class _MultiBacktestWorker(QThread):
         total_steps = len(algorithms) + len(benchmarks)
         step = 0
 
-        # ── Завантажуємо всі дані одним запитом (train + test разом) ───────────
-        repo = PortfolioRepository()
+        repo    = PortfolioRepository()
         tickers = repo.get_all_tickers()
-        df = repo.get_price_history(tickers)
+        df      = repo.get_price_history(tickers)
         df.index = pd.to_datetime(df.index)
         df = df.sort_index()
 
         train_raw = df[(df.index >= train_start) & (df.index <= train_end)]
         test_raw  = df[(df.index >= bt_start)    & (df.index <= bt_end)]
 
-        # Тікер валідний лише якщо має дані в ОБОХ вікнах:
-        #   • train: ≥50% непустих рядків (для оптимізації)
-        #   • test:  має хоча б один непустий рядок (потрібна ціна відкриття)
-        min_train = int(len(train_raw) * 0.5)
+        min_train      = int(len(train_raw) * 0.5)
         valid_in_train = train_raw.notna().sum()
         valid_in_train = valid_in_train[valid_in_train >= min_train].index
 
@@ -922,17 +1046,13 @@ class _MultiBacktestWorker(QThread):
 
         train = train_raw[valid_tickers].dropna()
 
-        # ── BacktestEngine отримує вже відфільтровані дані через mock-repo ─────
-        # Передаємо готовий DataFrame напряму, щоб engine не робив зайвий
-        # запит до БД і не натикався на тікери без test-даних.
         class _InMemoryRepo:
-            """Мінімальний адаптер: повертає вже завантажений DataFrame."""
             def __init__(self, prices_df):
                 self._df = prices_df
 
             def get_price_history(self, tickers, start_date=None, end_date=None):
                 cols = [t for t in tickers if t in self._df.columns]
-                sub = self._df[cols]
+                sub  = self._df[cols]
                 if start_date:
                     sub = sub[sub.index >= start_date]
                 if end_date:
@@ -940,29 +1060,25 @@ class _MultiBacktestWorker(QThread):
                 return sub
 
         test_df = test_raw[valid_tickers].copy()
-        engine = BacktestEngine(
-            start_date=bt_start,
-            end_date=bt_end,
-            initial_capital=capital,
-            risk_free_rate=rfr,
+        engine  = BacktestEngine(
+            start_date=bt_start, end_date=bt_end,
+            initial_capital=capital, risk_free_rate=rfr,
             rebalance_every=rebalance,
-            repo=_InMemoryRepo(test_df),   # ← дані вже в пам'яті, без зайвого DB-запиту
+            repo=_InMemoryRepo(test_df),
         )
 
         def _metrics_to_dict(m) -> dict:
-            """Конвертує BacktestMetrics → dict у форматі, який очікує _ComparisonDashboard."""
             return dict(
                 total_return=m.total_return,
                 cagr=m.cagr,
                 volatility=m.annualised_volatility,
                 max_dd=m.max_drawdown,
                 sharpe=m.sharpe_ratio,
+                sortino=m.sortino_ratio,
             )
 
-        # Збираємо PortfolioSpec-и для всіх алгоритмів, щоб передати в engine.run()
-        # одним викликом і уникнути повторного завантаження цін.
         specs: list[PortfolioSpec] = []
-        spec_meta: list[dict] = []   # зберігає color, is_benchmark, weights для відображення
+        spec_meta: list[dict]      = []
 
         # ── Hybrid Evo ──────────────────────────────────────────────────────
         if "hybrid_evo" in algorithms:
@@ -976,8 +1092,7 @@ class _MultiBacktestWorker(QThread):
             )
             res = opt.run(tickers=valid_tickers, end_date=train_end)
             specs.append(PortfolioSpec(name="Hybrid Evo", weights=res.weights))
-            spec_meta.append(dict(color=color, is_benchmark=False,
-                                  weights=res.weights))
+            spec_meta.append(dict(color=color, is_benchmark=False, weights=res.weights))
 
         # ── Markowitz ───────────────────────────────────────────────────────
         if "markowitz" in algorithms:
@@ -1015,8 +1130,7 @@ class _MultiBacktestWorker(QThread):
             except Exception as exc:
                 logger.warning("Plugin %s failed: %s", plugin_name, exc)
 
-        # ── Бенчмарк Equal-Weight ────────────────────────────────────────────
-        # Додаємо як звичайний PortfolioSpec — engine рахує його нарівні з іншими.
+        # ── Equal-Weight benchmark ───────────────────────────────────────────
         if "equal_weight" in benchmarks:
             step += 1
             self.progress_updated.emit(int(step / total_steps * 90),
@@ -1029,11 +1143,9 @@ class _MultiBacktestWorker(QThread):
             self.progress_updated.emit(100, "Done")
             return []
 
-        # ── Запуск BacktestEngine одним викликом ─────────────────────────────
         self.progress_updated.emit(92, "Simulating backtest with rebalancing...")
         report = engine.run(specs)
 
-        # ── Збірка series_list для _ComparisonDashboard ──────────────────────
         series_list: list[dict] = []
         for result, meta in zip(report.results, spec_meta):
             series_list.append(dict(
@@ -1054,13 +1166,7 @@ class _MultiBacktestWorker(QThread):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class BacktestWidget(QWidget):
-    """
-    Сторінка «Comparison Backtest» — порівняння кількох алгоритмів.
-
-    Parameters
-    ----------
-    core : PortfolioCore
-    """
+    """Сторінка «Comparison Backtest» — порівняння кількох алгоритмів."""
 
     _IDX_EMPTY   = 0
     _IDX_SPINNER = 1
@@ -1072,8 +1178,6 @@ class BacktestWidget(QWidget):
         self._core   = core
         self._worker: _MultiBacktestWorker | None = None
         self._build_ui()
-
-    # ── Побудова ─────────────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -1093,8 +1197,6 @@ class BacktestWidget(QWidget):
         body.addWidget(self._vline())
 
         self._result_stack = QStackedWidget()
-
-
         self._empty_view   = _EmptyState()
         self._spinner_view = _SpinnerView()
         self._dashboard    = _ComparisonDashboard()
@@ -1113,12 +1215,12 @@ class BacktestWidget(QWidget):
         bar = QWidget()
         bar.setFixedHeight(52)
         bar.setStyleSheet(f"background-color: {_SURFACE}; border-bottom: 1px solid {_BORDER};")
-
         lyt = QHBoxLayout(bar)
         lyt.setContentsMargins(24, 0, 24, 0)
 
         title = QLabel("Comparison Backtest")
-        title.setStyleSheet(f"color: {_TEXT_PRI}; font-size: 14px; font-weight: 700; letter-spacing: 0.3px;")
+        title.setStyleSheet(f"color: {_TEXT_PRI}; font-size: 14px; font-weight: 700;"
+                            f" letter-spacing: 0.3px;")
         lyt.addWidget(title)
         lyt.addStretch()
 
@@ -1140,7 +1242,7 @@ class BacktestWidget(QWidget):
         f = QFrame()
         f.setFrameShape(QFrame.HLine)
         f.setFixedHeight(1)
-        f.setStyleSheet("background: palette(mid); border: none;")
+        f.setStyleSheet(f"background: {_BORDER}; border: none;")
         return f
 
     @staticmethod
@@ -1148,7 +1250,7 @@ class BacktestWidget(QWidget):
         f = QFrame()
         f.setFrameShape(QFrame.VLine)
         f.setFixedWidth(1)
-        f.setStyleSheet("background: palette(mid); border: none;")
+        f.setStyleSheet(f"background: {_BORDER}; border: none;")
         return f
 
     # ── Слоти ─────────────────────────────────────────────────────────────────
@@ -1196,6 +1298,9 @@ class BacktestWidget(QWidget):
         self._status_badge.setText(text)
         self._status_badge.setStyleSheet(f"""
             color: {color};
-            border: 1px solid {color}; border-radius: 10px;
-            padding: 3px 12px; font-size: 11px; font-weight: 600;
+            border: 1px solid {color};
+            border-radius: 10px;
+            padding: 3px 12px;
+            font-size: 11px;
+            font-weight: 600;
         """)
