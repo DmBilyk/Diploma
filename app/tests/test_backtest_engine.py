@@ -416,19 +416,45 @@ class TestRunEndToEnd(unittest.TestCase):
         # Benchmark also starts at initial capital
         self.assertAlmostEqual(bench.portfolio_values.iloc[0], 100_000.0, places=4)
 
-    def test_global_benchmark_emits_deprecation_warning(self):
-        spec = PortfolioSpec(
-            name="P", weights={"AAPL": 1.0},
-        )
+    def test_report_global_benchmark_is_none(self):
+        """Global benchmark was removed; per-portfolio benchmarks live on
+        ``BacktestResult.benchmark`` and ``BacktestResult.benchmarks``.
+
+        ``engine.run`` MUST NOT populate ``BacktestReport.benchmark`` and
+        MUST NOT emit any DeprecationWarning during a normal run.
+        """
+        spec = PortfolioSpec(name="P", weights={"AAPL": 1.0})
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             report = self.engine.run([spec])
 
-        # At least one DeprecationWarning should be present for the global bench
+        # New contract: global benchmark slot is unused.
+        self.assertIsNone(report.benchmark)
+
+        # Per-portfolio benchmark IS populated on the result (Phase 5).
+        self.assertIsInstance(report.results[0].benchmark, BacktestResult)
+        self.assertGreaterEqual(len(report.results[0].benchmarks), 1)
+
+        # Normal `run()` must be quiet — deprecation noise would clutter
+        # callers' logs and contradict the documented "stable" status of
+        # the per-portfolio benchmark API.
+        dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+        self.assertEqual(len(dep_warnings), 0,
+                         f"Unexpected DeprecationWarning(s): "
+                         f"{[str(w.message) for w in dep_warnings]}")
+
+    def test_legacy_build_benchmark_still_emits_deprecation_warning(self):
+        """``_build_benchmark`` is kept for backward compatibility but must
+        emit a DeprecationWarning when called directly, so any external
+        legacy code paths continue to be flagged."""
+        prices = self.engine._load_prices(["AAPL", "MSFT"])
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            bench = self.engine._build_benchmark(prices)
+
         dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
         self.assertGreaterEqual(len(dep_warnings), 1)
-        # The global benchmark still exists for backward compatibility
-        self.assertIsInstance(report.benchmark, BacktestResult)
+        self.assertIsInstance(bench, BacktestResult)
 
     def test_repository_called_with_union_of_tickers(self):
         p1 = PortfolioSpec(name="A", weights={"AAPL": 1.0})

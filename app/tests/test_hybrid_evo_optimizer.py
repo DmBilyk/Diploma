@@ -81,8 +81,10 @@ class TestNumbaKernels(unittest.TestCase):
         # Pre-normalisation weights — evaluator should normalise them.
         weights = np.array([2.0, 0.0, 1.0, 1.0])
         binary = np.array([1.0, 0.0, 1.0, 1.0])
+        # lam_conc=0.0 preserves the legacy fitness exactly.
         fitness, w_out = _evaluate_numba(
-            weights, binary, mu, cov, 0.02, K=3, lam_k=50.0, lam_neg=200.0
+            weights, binary, mu, cov, 0.02,
+            K=3, lam_k=50.0, lam_neg=200.0, lam_conc=0.0,
         )
         # Normalised weights must sum to 1 on active positions
         self.assertAlmostEqual(w_out.sum(), 1.0, places=10)
@@ -95,11 +97,13 @@ class TestNumbaKernels(unittest.TestCase):
         weights = np.ones(6) / 6
         binary = np.ones(6)
         fit_over, _ = _evaluate_numba(
-            weights, binary, mu, cov, 0.02, K=3, lam_k=50.0, lam_neg=200.0
+            weights, binary, mu, cov, 0.02,
+            K=3, lam_k=50.0, lam_neg=200.0, lam_conc=0.0,
         )
         # Same weights/binary but K=6 (no violation) should score higher
         fit_ok, _ = _evaluate_numba(
-            weights, binary, mu, cov, 0.02, K=6, lam_k=50.0, lam_neg=200.0
+            weights, binary, mu, cov, 0.02,
+            K=6, lam_k=50.0, lam_neg=200.0, lam_conc=0.0,
         )
         self.assertLess(fit_over, fit_ok)
 
@@ -108,7 +112,8 @@ class TestNumbaKernels(unittest.TestCase):
         weights = np.zeros(3)
         binary = np.zeros(3)
         fitness, _ = _evaluate_numba(
-            weights, binary, mu, cov, 0.02, K=3, lam_k=50.0, lam_neg=200.0
+            weights, binary, mu, cov, 0.02,
+            K=3, lam_k=50.0, lam_neg=200.0, lam_conc=0.0,
         )
         self.assertEqual(fitness, -1e6)
 

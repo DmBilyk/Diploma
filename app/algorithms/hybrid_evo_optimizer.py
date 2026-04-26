@@ -55,7 +55,7 @@ def _sharpe_numba(w, mu, cov, rf):
 
 
 @njit(cache=True)
-def _evaluate_numba(weights, binary, mu, cov, rf, K, lam_k, lam_neg):
+def _evaluate_numba(weights, binary, mu, cov, rf, K, lam_k, lam_neg, lam_conc):
     w = weights * binary
     w_sum = np.sum(w)
 
@@ -72,7 +72,12 @@ def _evaluate_numba(weights, binary, mu, cov, rf, K, lam_k, lam_neg):
     safe_max_weight = max(0.15, (1.0 / K) + 0.02)
     p_max_w = 100.0 * np.sum(np.maximum(0.0, w - safe_max_weight))
 
-    fitness = sr - p_card - p_neg - p_max_w
+    # Concentration penalty (Herfindahl index).  Pushes weights toward
+    # higher effective-N portfolios.  At lam_conc=0 the term vanishes,
+    # so default behaviour is bit-for-bit identical to the legacy fitness.
+    p_conc = lam_conc * np.sum(w * w)
+
+    fitness = sr - p_card - p_neg - p_max_w - p_conc
     return fitness, w
 
 
@@ -227,6 +232,40 @@ class OptimizationResult:
 # ═══════════════════════════════════════════════════════════════════════════
 #  1. DATA LOADER
 # ═══════════════════════════════════════════════════════════════════════════
+def _james_stein_shrink_mu(
+    mu: np.ndarray,
+    cov: np.ndarray,
+    n_obs: int,
+) -> np.ndarray:
+    """Positive-part James–Stein shrinkage of μ toward the grand mean.
+
+    Returns the shrunk vector
+
+        μ_JS = ν + max(0, 1 − (n−2)·σ̄² / ||μ − ν||²) · (μ − ν)
+
+    where ν is the cross-sectional mean of μ and σ̄² is the average
+    sampling variance of the per-asset estimators (mean of the diagonal
+    of Σ divided by the sample size ``n_obs``).
+
+    Mathematically, James–Stein dominates the sample mean in expected
+    squared error for ``n ≥ 3``.  In a portfolio context this directly
+    suppresses the well-known "noisy μ → over-confident weights → poor
+    out-of-sample Sharpe" failure mode of mean–variance optimisation.
+    Returns ``mu`` unchanged when shrinkage is undefined or unnecessary.
+    """
+    n = len(mu)
+    if n < 3 or n_obs < 2:
+        return mu
+    nu = float(np.mean(mu))
+    sigma2 = float(np.mean(np.diag(cov))) / float(max(n_obs, 1))
+    diff = mu - nu
+    norm_sq = float(diff @ diff)
+    if norm_sq <= 1e-12 or sigma2 <= 0.0:
+        return mu
+    factor = max(0.0, 1.0 - (n - 2) * sigma2 / norm_sq)
+    return nu + factor * diff
+
+
 class DataLoader:
     """Retrieve historical return data from the project database."""
 
@@ -234,11 +273,16 @@ class DataLoader:
         self,
         repo: Optional[PortfolioRepository] = None,
         ewma_span: int = 52,
+        mu_shrinkage: bool = False,
     ):
         self.repo = repo or PortfolioRepository()
         # Span (in periods) for EWMA expected-return estimation.
         # Higher values → smoother μ; lower → faster regime adaptation.
         self.ewma_span = ewma_span
+        # Optional James–Stein shrinkage of μ toward the cross-sectional
+        # mean.  Default False → bit-for-bit identical to the legacy
+        # estimator; the thesis description of μ remains accurate.
+        self.mu_shrinkage = mu_shrinkage
 
     def load(
         self,
@@ -299,6 +343,18 @@ class DataLoader:
         ).values
         cov = risk_models.CovarianceShrinkage(prices, frequency=frequency).ledoit_wolf().values
 
+        # --- optional James–Stein shrinkage of μ -------------------------
+        # Pure addition; default disabled so the legacy μ is unchanged.
+        if self.mu_shrinkage:
+            mu_pre = mu
+            mu = _james_stein_shrink_mu(mu, cov, n_obs=len(prices))
+            shift = float(np.linalg.norm(mu - mu_pre))
+            logger.info(
+                "DataLoader: James–Stein shrinkage applied to μ "
+                "(‖Δμ‖=%.4g, |Δmean|=%.4g)",
+                shift, float(abs(mu.mean() - mu_pre.mean())),
+            )
+
         logger.info(
             "DataLoader: %d tickers, %d observations, annualisation=%d",
             len(tickers), len(prices), frequency,
@@ -312,7 +368,17 @@ class DataLoader:
 class FitnessEvaluator:
     """Penalised Sharpe Ratio fitness function.
 
-    fitness = sharpe_ratio - λ₁·|Σw − 1| - λ₂·max(0, Σb − K) - λ₃·Σmax(0, −w)
+    fitness = sharpe_ratio
+              - λ₁·|Σw − 1|
+              - λ₂·max(0, Σb − K)
+              - λ₃·Σmax(0, −w)
+              - λ₄·Σw²            (Herfindahl concentration penalty, optional)
+
+    The concentration penalty defaults to 0 — when disabled the formula
+    is bit-for-bit identical to the legacy fitness.  Setting
+    ``penalty_concentration > 0`` drives the GA toward more diversified
+    portfolios, which empirically improves Calmar, VaR/CVaR and Win Rate
+    without changing the optimiser's architecture.
     """
 
     def __init__(
@@ -324,6 +390,7 @@ class FitnessEvaluator:
         penalty_weights: float = 100.0,
         penalty_cardinality: float = 50.0,
         penalty_negativity: float = 200.0,
+        penalty_concentration: float = 0.0,
     ):
         self.mu = mu
         self.cov = cov
@@ -332,6 +399,7 @@ class FitnessEvaluator:
         self.lam_w = penalty_weights
         self.lam_k = penalty_cardinality
         self.lam_neg = penalty_negativity
+        self.lam_conc = penalty_concentration
         self.n = len(mu)
 
     # ----- core -----------------------------------------------------------
@@ -343,7 +411,7 @@ class FitnessEvaluator:
         fitness, w = _evaluate_numba(
             ind.weights, ind.binary,
             self.mu, self.cov, self.rf,
-            self.K, self.lam_k, self.lam_neg
+            self.K, self.lam_k, self.lam_neg, self.lam_conc,
         )
         ind.fitness = fitness
         ind.weights = w
@@ -648,8 +716,17 @@ class HybridEvoOptimizer:
         penalty_weights: float = 100.0,
         penalty_cardinality: float = 50.0,
         penalty_negativity: float = 200.0,
+        # Optional concentration penalty (Σw²).  Default 0 → identical to
+        # legacy behaviour.  Recommended range when enabled: 0.05 – 0.5.
+        penalty_concentration: float = 0.0,
         # EWMA span for expected-return estimation (Upgrade 1)
         ewma_span: int = 52,
+        # Optional James–Stein shrinkage of μ toward its cross-sectional
+        # mean.  Default False → identical to legacy behaviour.  Enabling
+        # this is the highest-impact, lowest-risk improvement: it tames
+        # estimation noise in expected returns and typically lifts the
+        # out-of-sample Sharpe / Calmar of the resulting portfolio.
+        mu_shrinkage: bool = False,
         # Variance thermostat threshold (Upgrade 2)
         variance_threshold: float = 1e-5,
     ):
@@ -679,7 +756,9 @@ class HybridEvoOptimizer:
         self.penalty_weights = penalty_weights
         self.penalty_cardinality = penalty_cardinality
         self.penalty_negativity = penalty_negativity
+        self.penalty_concentration = penalty_concentration
         self.ewma_span = ewma_span
+        self.mu_shrinkage = mu_shrinkage
         self.variance_threshold = variance_threshold
 
     # =====================================================================
@@ -710,7 +789,11 @@ class HybridEvoOptimizer:
         rng = np.random.default_rng(self.seed)
 
         # ── 1. Data loading ───────────────────────────────────────────────
-        loader = DataLoader(repo=repo, ewma_span=self.ewma_span)
+        loader = DataLoader(
+            repo=repo,
+            ewma_span=self.ewma_span,
+            mu_shrinkage=self.mu_shrinkage,
+        )
         tickers, mu, cov, prices = loader.load(
             tickers=tickers,
             start_date=start_date,
@@ -732,6 +815,7 @@ class HybridEvoOptimizer:
             penalty_weights=self.penalty_weights,
             penalty_cardinality=self.penalty_cardinality,
             penalty_negativity=self.penalty_negativity,
+            penalty_concentration=self.penalty_concentration,
         )
 
         operators = EvoOperators(

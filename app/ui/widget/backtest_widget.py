@@ -45,11 +45,13 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDateEdit,
     QDoubleSpinBox,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -132,6 +134,7 @@ class _ToggleCard(QFrame):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("toggleCard")
+        self._title   = title  # plain string — read by _PluginSelector.selected_plugins()
         self._color   = color
         self._checked = checked
         self.setCursor(Qt.PointingHandCursor)
@@ -569,7 +572,9 @@ class _MetricsTable(QTableWidget):
     """Компактна таблиця порівняння метрик усіх алгоритмів."""
 
     _COLUMNS = ["Algorithm", "Start ($)", "End ($)", "Return",
-                "CAGR", "Volatility", "Max Drawdown", "Sharpe", "Sortino"]
+                "CAGR", "Volatility", "Max Drawdown", "Sharpe", "Sortino",
+                "Calmar", "Info Ratio", "VaR 95%", "CVaR 95%",
+                "Win Rate", "Turnover", "# Holdings"]
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(0, len(self._COLUMNS), parent)
@@ -625,6 +630,13 @@ class _MetricsTable(QTableWidget):
                 row_data.get("max_drawdown", "—"),
                 row_data.get("sharpe", "—"),
                 row_data.get("sortino", "—"),
+                row_data.get("calmar", "—"),
+                row_data.get("info_ratio", "—"),
+                row_data.get("var_95", "—"),
+                row_data.get("cvar_95", "—"),
+                row_data.get("win_rate", "—"),
+                row_data.get("turnover", "—"),
+                row_data.get("n_holdings", "—"),
             ]
             for col_idx, val in enumerate(values):
                 item = QTableWidgetItem(val)
@@ -734,6 +746,22 @@ class _ComparisonDashboard(QWidget):
     def render(self, series_list: list[dict]) -> None:
         self._series = series_list
 
+        def _fmt_pct(v, sign: bool = False) -> str:
+            try:
+                if v is None or (isinstance(v, float) and np.isnan(v)):
+                    return "—"
+                return f"{v:+.2%}" if sign else f"{v:.2%}"
+            except (TypeError, ValueError):
+                return "—"
+
+        def _fmt_num(v, places: int = 2) -> str:
+            try:
+                if v is None or (isinstance(v, float) and np.isnan(v)):
+                    return "—"
+                return f"{v:.{places}f}"
+            except (TypeError, ValueError):
+                return "—"
+
         table_rows = []
         for s in series_list:
             m = s.get("metrics", {})
@@ -742,12 +770,19 @@ class _ComparisonDashboard(QWidget):
                 "name":         s["name"],
                 "start":        f"${s['equity'].iloc[0]:,.0f}",
                 "finish":       f"${s['equity'].iloc[-1]:,.0f}",
-                "total_return": f"{m.get('total_return', 0):+.2%}",
-                "cagr":         f"{m.get('cagr', 0):.2%}",
-                "volatility":   f"{m.get('volatility', 0):.2%}",
-                "max_drawdown": f"{m.get('max_dd', 0):.2%}",
-                "sharpe":       f"{m.get('sharpe', 0):.2f}",
-                "sortino":      f"{m.get('sortino', 0):.2f}",
+                "total_return": _fmt_pct(m.get("total_return"), sign=True),
+                "cagr":         _fmt_pct(m.get("cagr")),
+                "volatility":   _fmt_pct(m.get("volatility")),
+                "max_drawdown": _fmt_pct(m.get("max_dd")),
+                "sharpe":       _fmt_num(m.get("sharpe")),
+                "sortino":      _fmt_num(m.get("sortino")),
+                "calmar":       _fmt_num(m.get("calmar")),
+                "info_ratio":   _fmt_num(m.get("info_ratio")),
+                "var_95":       _fmt_pct(m.get("var_95")),
+                "cvar_95":      _fmt_pct(m.get("cvar_95")),
+                "win_rate":     _fmt_pct(m.get("win_rate")),
+                "turnover":     _fmt_pct(m.get("turnover")),
+                "n_holdings":   str(int(m.get("n_holdings") or 0)),
             })
         self._table.populate(table_rows)
 
@@ -987,6 +1022,8 @@ class _MultiBacktestWorker(QThread):
         super().__init__(parent)
         self._core   = core
         self._params = params
+        # Phase 7: keep the full BacktestReport so the UI can export it.
+        self.report = None
 
     def run(self) -> None:
         try:
@@ -1068,6 +1105,9 @@ class _MultiBacktestWorker(QThread):
         )
 
         def _metrics_to_dict(m) -> dict:
+            # Phase 1 fields are exposed alongside the legacy ones.  Defaults
+            # via getattr keep this safe if an older BacktestMetrics ever
+            # flows through (e.g. a deserialised report from a prior build).
             return dict(
                 total_return=m.total_return,
                 cagr=m.cagr,
@@ -1075,6 +1115,13 @@ class _MultiBacktestWorker(QThread):
                 max_dd=m.max_drawdown,
                 sharpe=m.sharpe_ratio,
                 sortino=m.sortino_ratio,
+                calmar=getattr(m, "calmar_ratio", float("nan")),
+                info_ratio=getattr(m, "information_ratio", float("nan")),
+                var_95=getattr(m, "var_95", float("nan")),
+                cvar_95=getattr(m, "cvar_95", float("nan")),
+                win_rate=getattr(m, "win_rate", float("nan")),
+                turnover=getattr(m, "turnover", float("nan")),
+                n_holdings=getattr(m, "avg_n_holdings", 0),
             )
 
         specs: list[PortfolioSpec] = []
@@ -1089,8 +1136,17 @@ class _MultiBacktestWorker(QThread):
             opt = HybridEvoOptimizer(
                 pop_size=pop_size, n_generations=n_gen,
                 max_cardinality=max_k, risk_free_rate=rfr, seed=42,
+                mu_shrinkage=True,            # James-Stein на μ — ↓ оцінкового шуму
+                penalty_concentration=0.1,    # м'який anti-Herfindahl
             )
-            res = opt.run(tickers=valid_tickers, end_date=train_end)
+            # ВАЖЛИВО: передаємо start_date, інакше Hybrid Evo тренується на
+            # всій історії БД (~30 років), а Markowitz — лише на [train_start,
+            # train_end].  Це робило порівняння нечесним.
+            res = opt.run(
+                tickers=valid_tickers,
+                start_date=train_start,
+                end_date=train_end,
+            )
             specs.append(PortfolioSpec(name="Hybrid Evo", weights=res.weights))
             spec_meta.append(dict(color=color, is_benchmark=False, weights=res.weights))
 
@@ -1105,6 +1161,14 @@ class _MultiBacktestWorker(QThread):
             ef = EfficientFrontier(mu, S, solver="SCS")
             ef.max_sharpe(risk_free_rate=rfr)
             w_m = {k: v for k, v in ef.clean_weights().items() if v > 0.001}
+            # Apply the same cardinality constraint as Hybrid Evo so the
+            # comparison is like-for-like (same K assets to choose from).
+            # Without this, Markowitz silently runs unconstrained while
+            # Hybrid Evo is capped at K, which is not a fair contest.
+            if len(w_m) > max_k:
+                top_k = dict(sorted(w_m.items(), key=lambda kv: kv[1], reverse=True)[:max_k])
+                _s = sum(top_k.values())
+                w_m = {t: v / _s for t, v in top_k.items()} if _s > 1e-9 else top_k
             specs.append(PortfolioSpec(name="Markowitz", weights=w_m))
             spec_meta.append(dict(color=color, is_benchmark=False, weights=w_m))
 
@@ -1145,6 +1209,8 @@ class _MultiBacktestWorker(QThread):
 
         self.progress_updated.emit(92, "Simulating backtest with rebalancing...")
         report = engine.run(specs)
+        # Phase 7: expose the full report so BacktestWidget can export it.
+        self.report = report
 
         series_list: list[dict] = []
         for result, meta in zip(report.results, spec_meta):
@@ -1177,6 +1243,8 @@ class BacktestWidget(QWidget):
         self.setStyleSheet(f"background-color: {_BG};")
         self._core   = core
         self._worker: _MultiBacktestWorker | None = None
+        # Phase 7: latest BacktestReport for export
+        self._last_report = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -1224,6 +1292,48 @@ class BacktestWidget(QWidget):
         lyt.addWidget(title)
         lyt.addStretch()
 
+        # ── Phase 7: export buttons (disabled until a report exists) ──
+        export_btn_style = (
+            f"QPushButton {{"
+            f"  color: {_TEXT_PRI};"
+            f"  background-color: transparent;"
+            f"  border: 1px solid {_BORDER};"
+            f"  border-radius: 4px;"
+            f"  padding: 4px 12px;"
+            f"  font-size: 11px;"
+            f"  font-weight: 600;"
+            f"}}"
+            f"QPushButton:hover:enabled {{ border-color: {_ACCENT}; color: {_ACCENT}; }}"
+            f"QPushButton:disabled {{ color: {_TEXT_SEC}; border-color: {_BORDER}; }}"
+        )
+
+        self._btn_export_json = QPushButton("Export JSON")
+        self._btn_export_json.setEnabled(False)
+        self._btn_export_json.setStyleSheet(export_btn_style)
+        self._btn_export_json.setToolTip(
+            "Save the full backtest report as a JSON file (round-trippable)."
+        )
+        self._btn_export_json.clicked.connect(self._on_export_json)
+        lyt.addWidget(self._btn_export_json)
+
+        self._btn_export_html = QPushButton("Export HTML")
+        self._btn_export_html.setEnabled(False)
+        self._btn_export_html.setStyleSheet(export_btn_style)
+        self._btn_export_html.setToolTip(
+            "Save a self-contained HTML report with embedded charts."
+        )
+        self._btn_export_html.clicked.connect(self._on_export_html)
+        lyt.addWidget(self._btn_export_html)
+
+        self._btn_export_csv = QPushButton("Export CSV")
+        self._btn_export_csv.setEnabled(False)
+        self._btn_export_csv.setStyleSheet(export_btn_style)
+        self._btn_export_csv.setToolTip(
+            "Save per-portfolio equity curves and a metrics-summary CSV."
+        )
+        self._btn_export_csv.clicked.connect(self._on_export_csv)
+        lyt.addWidget(self._btn_export_csv)
+
         self._status_badge = QLabel("Idle")
         self._status_badge.setStyleSheet(f"""
             color: {_TEXT_SEC};
@@ -1260,6 +1370,11 @@ class BacktestWidget(QWidget):
             return
 
         self._ctrl.btn_run.setEnabled(False)
+        # Clear stale export state — the previous report is no longer "current".
+        self._last_report = None
+        self._btn_export_json.setEnabled(False)
+        self._btn_export_html.setEnabled(False)
+        self._btn_export_csv.setEnabled(False)
         self._result_stack.setCurrentIndex(self._IDX_SPINNER)
         self._spinner_view.start("Running comparison analysis...")
         self._set_status("Running", _ACCENT)
@@ -1276,6 +1391,12 @@ class BacktestWidget(QWidget):
     def _on_finished(self, series_list: list) -> None:
         self._spinner_view.stop()
         self._ctrl.btn_run.setEnabled(True)
+        # Phase 7: capture the full BacktestReport for export.
+        self._last_report = getattr(self._worker, "report", None)
+        has_export = self._last_report is not None and bool(series_list)
+        self._btn_export_json.setEnabled(has_export)
+        self._btn_export_html.setEnabled(has_export)
+        self._btn_export_csv.setEnabled(has_export)
         if series_list:
             self._dashboard.render(series_list)
             self._result_stack.setCurrentIndex(self._IDX_RESULTS)
@@ -1293,6 +1414,63 @@ class BacktestWidget(QWidget):
         logger.error("Comparison backtest error: %s", msg)
         QMessageBox.critical(self, "Backtest Error",
                              f"The comparison run failed:\n\n{msg}")
+
+    # ── Phase 7: export slots ────────────────────────────────────────────────
+
+    def _on_export_json(self) -> None:
+        if self._last_report is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export backtest report (JSON)",
+            "backtest_report.json", "JSON files (*.json)",
+        )
+        if not path:
+            return
+        try:
+            self._last_report.save_json(path)
+        except Exception as exc:
+            logger.exception("JSON export failed")
+            QMessageBox.critical(self, "Export failed", f"Could not write JSON:\n\n{exc}")
+            return
+        QMessageBox.information(self, "Export complete",
+                                f"Report saved to:\n{path}")
+
+    def _on_export_html(self) -> None:
+        if self._last_report is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export backtest report (HTML)",
+            "backtest_report.html", "HTML files (*.html)",
+        )
+        if not path:
+            return
+        try:
+            self._last_report.save_html(path)
+        except Exception as exc:
+            logger.exception("HTML export failed")
+            QMessageBox.critical(self, "Export failed", f"Could not write HTML:\n\n{exc}")
+            return
+        QMessageBox.information(self, "Export complete",
+                                f"Report saved to:\n{path}")
+
+    def _on_export_csv(self) -> None:
+        if self._last_report is None:
+            return
+        directory = QFileDialog.getExistingDirectory(
+            self, "Choose folder for CSV export",
+        )
+        if not directory:
+            return
+        try:
+            written = self._last_report.save_csv(directory)
+        except Exception as exc:
+            logger.exception("CSV export failed")
+            QMessageBox.critical(self, "Export failed", f"Could not write CSV:\n\n{exc}")
+            return
+        QMessageBox.information(
+            self, "Export complete",
+            f"Wrote {len(written)} files to:\n{directory}",
+        )
 
     def _set_status(self, text: str, color: str) -> None:
         self._status_badge.setText(text)
