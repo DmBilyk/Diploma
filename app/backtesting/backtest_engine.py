@@ -141,6 +141,19 @@ class BacktestEngine:
         if rebalance_every is not None and rebalance_every < 1:
             raise ValueError("rebalance_every must be a positive integer")
 
+        try:
+            _t_start = pd.Timestamp(start_date)
+            _t_end   = pd.Timestamp(end_date)
+        except Exception as exc:
+            raise ValueError(
+                f"Invalid date format: start='{start_date}', end='{end_date}'"
+            ) from exc
+        if _t_start >= _t_end:
+            raise ValueError(
+                f"start_date ({start_date}) must be strictly before "
+                f"end_date ({end_date})"
+            )
+
         self._start = start_date
         self._end = end_date
         self._capital = float(initial_capital)
@@ -204,12 +217,9 @@ class BacktestEngine:
                 benchmark=bench_result,
             ))
 
-        # Deprecated global benchmark — kept for backward compatibility
-        benchmark = self._build_benchmark(prices)
-
         return BacktestReport(
             results=results,
-            benchmark=benchmark,
+            benchmark=None,   # global EW benchmark removed; use BacktestResult.benchmark
             start_date=self._start,
             end_date=self._end,
             initial_capital=self._capital,
@@ -283,6 +293,12 @@ class BacktestEngine:
         """
         tickers = list(weights.keys())
         w = np.array([weights[t] for t in tickers], dtype=np.float64)
+
+        # Normalize so the full capital is always deployed, even when
+        # weights sum to e.g. 0.995 (within the accepted tolerance).
+        w_sum = w.sum()
+        if w_sum > _EPSILON:
+            w = w / w_sum
 
         subset = prices[tickers].copy()
         price_matrix = subset.values.astype(np.float64)  # (T, n_assets)

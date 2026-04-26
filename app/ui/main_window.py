@@ -81,10 +81,14 @@ class MainWindow(QMainWindow):
 
     def _apply_global_style(self) -> None:
         self.setStyleSheet(f"""
-            QMainWindow, QWidget {{
+            QMainWindow {{
                 background-color: {_BG};
                 color: {_TEXT_PRI};
-                font-family: "Inter", "SF Pro Display", "Segoe UI", sans-serif;
+                font-family: "SF Pro Display", "Inter", "Segoe UI", sans-serif;
+            }}
+            QWidget {{
+                color: {_TEXT_PRI};
+                font-family: "SF Pro Display", "Inter", "Segoe UI", sans-serif;
             }}
             QTableWidget {{
                 background-color: {_SURFACE};
@@ -373,6 +377,13 @@ class MainWindow(QMainWindow):
             self._table.setItem(row, 0, QTableWidgetItem(ticker))
             self._table.setItem(row, 1, QTableWidgetItem("S&P 500"))
         self._table.setSortingEnabled(True)
+
+        # Auto-select the first ticker so the chart is never blank on startup
+        if tickers:
+            self._table.selectRow(0)
+            quotes = self._repo.get_quotes(tickers[0])
+            if not quotes.empty:
+                self._stock_widget.load(ticker=tickers[0], data=quotes)
 
     def _on_ticker_selected(self, item: QTableWidgetItem) -> None:
         ticker = self._table.item(item.row(), 0).text()

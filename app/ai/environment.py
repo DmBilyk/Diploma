@@ -182,7 +182,7 @@ class PortfolioEnv(gym.Env):
         if len(self._return_history) >= 5:
             recent = np.array(self._return_history[-52:], dtype=np.float32)
             running_sharpe = float(
-                recent.mean() / (recent.std() + 1e-8) * np.sqrt(252)
+                recent.mean() / (recent.std() + 1e-8) * np.sqrt(52)  # weekly data → 52 bars/year
             )
         else:
             running_sharpe = 0.0

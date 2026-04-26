@@ -29,9 +29,8 @@ from stable_baselines3.common.callbacks import (
     BaseCallback,
     CallbackList,
     CheckpointCallback,
-    EvalCallback,
 )
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 from app.ai.environment import PortfolioEnv
 
@@ -151,6 +150,10 @@ class PPOPortfolioTrainer:
 
         self._model: Optional[PPO] = None
         self._vec_env: Optional[DummyVecEnv] = None
+        # Single RNG instance so each _random_subwindow() call produces a
+        # different window — recreating it with the same seed every call
+        # would always yield the identical slice.
+        self._rng = np.random.default_rng(seed)
 
     # ────────────────────────────────────────────────────────────────────
     #  Public API
@@ -250,7 +253,6 @@ class PPOPortfolioTrainer:
         resume_from: Optional[str | Path],
     ) -> None:
         vec_env = self._make_vec_env(returns_df)
-        eval_env = self._make_vec_env(returns_df)
 
         checkpoint_cb = CheckpointCallback(
             save_freq=max(checkpoint_every // self.n_envs, 1),
@@ -295,8 +297,7 @@ class PPOPortfolioTrainer:
 
     def _random_subwindow(self, min_frac: float, max_frac: float) -> pd.DataFrame:
         """Return a random contiguous slice of ``returns_df``."""
-        rng = np.random.default_rng(self.seed)
         n = len(self.returns_df)
-        length = int(n * rng.uniform(min_frac, max_frac))
-        start = int(rng.integers(0, n - length))
+        length = int(n * self._rng.uniform(min_frac, max_frac))
+        start = int(self._rng.integers(0, n - length))
         return self.returns_df.iloc[start : start + length]

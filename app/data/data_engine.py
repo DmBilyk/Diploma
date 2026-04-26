@@ -21,7 +21,12 @@ class DataEngine:
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
 
-            response = requests.get(url, headers=headers)
+            import ssl
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            response = requests.get(url, headers=headers, verify=False, timeout=15)
+
             response.raise_for_status()  # Перевірка на помилки (404, 403 тощо)
 
             # Парсимо HTML-текст відповіді
@@ -57,36 +62,39 @@ class DataEngine:
         valid_data = {}
         total_tickers = len(tickers)
 
-
         for i in range(0, total_tickers, chunk_size):
             batch = tickers[i: i + chunk_size]
 
-
             if progress_callback:
-
                 current_pct = 10 + int((i / total_tickers) * 80)
                 progress_callback(current_pct, f"Завантаження з Yahoo: {batch[0]}... ({i}/{total_tickers})")
 
+            # До 3 спроб на батч із затримкою між ними
+            for attempt in range(3):
+                try:
+                    data = yf.download(
+                        batch,
+                        start=start_str,
+                        end=end_str,
+                        interval=INTERVAL,
+                        group_by='ticker',
+                        auto_adjust=False,
+                        threads=True,
+                        progress=False
+                    )
+                    batch_results = self._process_batch_result(data, batch, min_length=0 if start_date else 100)
+                    valid_data.update(batch_results)
+                    break  # успіх — виходимо з циклу спроб
 
-            try:
-                data = yf.download(
-                    batch,
-                    start=start_str,
-                    end=end_str,
-                    interval=INTERVAL,
-                    group_by='ticker',
-                    auto_adjust=False,
-                    threads=True,
-                    progress=False
-                )
+                except Exception as e:
+                    if attempt < 2:
+                        wait = 2 ** attempt  # 1s, потім 2s
+                        print(f"   ⚠️ Batch attempt {attempt + 1}/3 failed: {e}. Retry in {wait}s...")
+                        time.sleep(wait)
+                    else:
+                        print(f"   ❌ Batch failed after 3 attempts ({batch[0]}...): {e}")
 
-                batch_results = self._process_batch_result(data, batch, min_length=0 if start_date else 100)
-                valid_data.update(batch_results)
-
-                time.sleep(1)
-
-            except Exception as e:
-                print(f"   ⚠️ Batch error: {e}")
+            time.sleep(1)
 
         return valid_data
 

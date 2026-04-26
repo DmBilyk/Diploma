@@ -80,7 +80,17 @@ class Experiment(Base):
     metrics: Mapped[dict] = mapped_column(JSON)
 
 
+_engine = None
+_Session = None
+
 def init_db():
-    engine = create_engine(DB_PATH, echo=False)
-    Base.metadata.create_all(engine)
-    return sessionmaker(engine)
+    global _engine, _Session
+    if _engine is None:
+        _engine = create_engine(
+            DB_PATH,
+            echo=False,
+            connect_args={"check_same_thread": False},
+        )
+        Base.metadata.create_all(_engine)
+        _Session = sessionmaker(_engine)
+    return _Session

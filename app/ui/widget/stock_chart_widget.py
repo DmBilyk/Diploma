@@ -98,6 +98,14 @@ class _ChartRenderer:
         self._y:     Optional[np.ndarray] = None
         self._dates  = None
 
+        # Paint axes dark immediately so there is no white flash before first render
+        self._ax.set_facecolor(_BG)
+        self._ax.set_xticks([])
+        self._ax.set_yticks([])
+        for spine in self._ax.spines.values():
+            spine.set_visible(False)
+        canvas.draw()
+
     def render(self, ticker: str, data: pd.DataFrame) -> None:
         theme = _chart_theme()
         self._annotation = None
@@ -159,7 +167,6 @@ class _ChartRenderer:
             color=pct_color,
         )
 
-        # Title — ticker + last price
         ax.set_title(
             f"{ticker}    ${last_price:,.2f}",
             fontsize=11, fontweight="700", pad=10,
@@ -252,7 +259,6 @@ class StockChartWidget(QWidget):
     def load(self, ticker: str, data: pd.DataFrame) -> None:
         self._ticker    = ticker
         self._full_data = data.copy()
-        self._ticker_label.setText(ticker)
         self._render_current_period()
 
     # ── UI construction ────────────────────────────────────────────────────────
@@ -277,9 +283,6 @@ class StockChartWidget(QWidget):
         layout.setContentsMargins(16, 0, 16, 0)
         layout.setSpacing(8)
 
-        self._ticker_label = QLabel("—")
-        self._ticker_label.setObjectName("tickerLabel")
-        layout.addWidget(self._ticker_label)
         layout.addStretch()
 
         self._period_buttons: dict[str, QPushButton] = {}
@@ -298,12 +301,6 @@ class StockChartWidget(QWidget):
             QWidget#chartHeader {{
                 background-color: {_SURFACE};
                 border-bottom: 1px solid {_BORDER};
-            }}
-            QLabel#tickerLabel {{
-                font-size: 14px;
-                font-weight: 700;
-                letter-spacing: 1.2px;
-                color: {_TEXT_PRI};
             }}
             QPushButton#periodBtn {{
                 background: transparent;

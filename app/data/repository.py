@@ -46,17 +46,21 @@ class PortfolioRepository:
             self.add_asset(ticker)
             asset_id = self.get_asset_id(ticker)
 
+        def _f(val) -> float:
+            """Повертає float, замінюючи NaN на 0.0."""
+            return float(val) if pd.notna(val) else 0.0
+
         records = []
         for index, row in df.iterrows():
             records.append({
                 "asset_id": asset_id,
                 "date": index.date(),
-                "open": row.get('Open', 0),
-                "high": row.get('High', 0),
-                "low": row.get('Low', 0),
-                "close": row.get('Close', 0),
-                "adj_close": row.get('Adj Close', 0),
-                "volume": int(row.get('Volume', 0))
+                "open":      _f(row.get('Open')),
+                "high":      _f(row.get('High')),
+                "low":       _f(row.get('Low')),
+                "close":     _f(row.get('Close')),
+                "adj_close": _f(row.get('Adj Close')),
+                "volume":    int(_f(row.get('Volume'))),  # _f вже замінила NaN → 0.0, тому int() безпечний
             })
 
         if not records:

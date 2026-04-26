@@ -81,6 +81,20 @@ def load_and_prepare(
     -------
     DataSplit
     """
+    if not (0.0 < train_frac < 1.0):
+        raise ValueError(f"train_frac must be in (0, 1), got {train_frac}")
+    if not (0.0 <= val_frac < 1.0):
+        raise ValueError(f"val_frac must be in [0, 1), got {val_frac}")
+    if train_frac + val_frac >= 1.0:
+        raise ValueError(
+            f"train_frac + val_frac must be < 1.0, got {train_frac + val_frac:.3f} "
+            "(no data would remain for the test split)"
+        )
+    if not (0.0 < outlier_clip <= 1.0):
+        raise ValueError(f"outlier_clip must be in (0, 1], got {outlier_clip}")
+    if max_assets < 1:
+        raise ValueError(f"max_assets must be ≥ 1, got {max_assets}")
+
     if tickers is None:
         tickers = repo.get_all_tickers()
     logger.info("Loading prices for %d tickers [%s → %s]", len(tickers), start_date, end_date)

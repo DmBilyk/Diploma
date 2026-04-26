@@ -26,13 +26,17 @@ from app.data.repository import PortfolioRepository
 from pypfopt import risk_models, expected_returns
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
-)
+# NOTE: logging.basicConfig() must NOT be called here — that is the
+# responsibility of the application entry-point (main.py), not a library module.
 
-# Suppress numpy overflow warnings in fitness calculations
-warnings.filterwarnings("ignore", category=RuntimeWarning)
+# Suppress only the specific numpy overflow / invalid-value warnings that can
+# legitimately arise inside fitness / covariance calculations, and only for
+# code originating in this module.  Global suppression would hide real bugs
+# elsewhere in the application.
+warnings.filterwarnings(
+    "ignore", category=RuntimeWarning,
+    message=r"overflow encountered|invalid value encountered|divide by zero",
+)
 
 from numba import njit
 
@@ -146,7 +150,6 @@ def _refine_numba(weights, binary, mu, cov, rf, max_iter, lr_init, lr_decay):
         new_b[best_inactive] = 1.0
 
         new_w = w.copy()
-        new_w[worst_active] = 0.0
         saved_weight = w[worst_active]
         new_w[worst_active] = 0.0
         new_w[best_inactive] = saved_weight
@@ -650,6 +653,15 @@ class HybridEvoOptimizer:
         # Variance thermostat threshold (Upgrade 2)
         variance_threshold: float = 1e-5,
     ):
+        if pop_size < 2:
+            raise ValueError("pop_size must be ≥ 2")
+        if n_generations < 1:
+            raise ValueError("n_generations must be ≥ 1")
+        if max_cardinality < 1:
+            raise ValueError("max_cardinality must be ≥ 1")
+        if not (0.0 <= risk_free_rate < 1.0):
+            raise ValueError("risk_free_rate must be in [0, 1)")
+
         self.pop_size = pop_size
         self.n_gen = n_generations
         self.K = max_cardinality
@@ -834,20 +846,24 @@ class HybridEvoOptimizer:
             if res.success:
                 w_full = np.zeros(n_assets)
                 w_full[active] = np.maximum(res.x, 0)
-                w_full /= w_full.sum()
-                # Build a temporary Individual to evaluate penalised fitness,
-                # so we compare apples-to-apples (fitness vs fitness).
-                from copy import deepcopy
-                candidate = deepcopy(champion_pre)
-                candidate.weights = w_full
-                evaluator.evaluate(candidate)
-                if candidate.fitness > champion_pre.fitness:
-                    champion_pre.weights = w_full
-                    champion_pre.fitness = candidate.fitness
-                    logger.info("Scipy SLSQP improved Sharpe to %.4f", champion_pre.fitness)
+                w_sum = w_full.sum()
+                if w_sum > 1e-12:          # guard: scipy may return all-zero solution
+                    w_full /= w_sum
+                    # Build a temporary Individual to evaluate penalised fitness,
+                    # so we compare apples-to-apples (fitness vs fitness).
+                    from copy import deepcopy
+                    candidate = deepcopy(champion_pre)
+                    candidate.weights = w_full
+                    evaluator.evaluate(candidate)
+                    if candidate.fitness > champion_pre.fitness:
+                        champion_pre.weights = w_full
+                        champion_pre.fitness = candidate.fitness
+                        logger.info("Scipy SLSQP improved Sharpe to %.4f", champion_pre.fitness)
             refined.append(champion_pre)
         except ImportError:
-            pass
+            pass  # scipy not installed — skip polish step
+        except Exception as exc:           # catch any numerical failure gracefully
+            logger.warning("Scipy polish failed and was skipped: %s", exc)
 
         # Overall best
         champion = max(refined, key=lambda x: x.fitness)
@@ -863,9 +879,15 @@ class HybridEvoOptimizer:
         port_risk = float(np.sqrt(max(port_var, 0.0)))
         sharpe = (port_return - self.rf) / port_risk if port_risk > 1e-12 else 0.0
 
-        weight_dict = {
+        # Filter out negligible weights, then renormalise so Σw = 1.0 exactly.
+        raw_dict = {
             t: float(wt) for t, wt in zip(selected_tickers, selected_weights) if wt > 1e-6
         }
+        _total = sum(raw_dict.values())
+        weight_dict = (
+            {t: wt / _total for t, wt in raw_dict.items()}
+            if _total > 1e-12 else raw_dict
+        )
 
         result = OptimizationResult(
             weights=weight_dict,

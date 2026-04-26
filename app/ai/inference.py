@@ -52,6 +52,11 @@ class PPOInference:
 
     def load(self) -> "PPOInference":
         """Load the model weights into memory (lazy – call before inference)."""
+        if not self.model_path.exists():
+            raise FileNotFoundError(
+                f"PPO model file not found: {self.model_path}. "
+                "Train the model first or check the path."
+            )
         self._model = PPO.load(str(self.model_path))
         logger.info("PPO model loaded from %s", self.model_path)
         return self
@@ -167,4 +172,6 @@ class PPOInference:
         weights = {t: float(w) for t, w in zip(tickers, mean_weights)}
         weights = {t: w for t, w in weights.items() if w >= min_weight}
         total = sum(weights.values())
+        if total < 1e-8:
+            raise RuntimeError("All average weights are zero after pruning – check your data.")
         return {t: w / total for t, w in weights.items()}

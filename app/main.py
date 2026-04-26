@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from app.ui.main_window import MainWindow
 from app.ui.loading_window import LoadingWindow
 from app.ui.workers import DataLoaderWorker
+from app.data.repository import PortfolioRepository
 
 
 def main():
@@ -38,6 +39,30 @@ def main():
 
     def on_error(message: str):
         loading.close()
+
+        # Перевіряємо, чи є хоч якісь дані з попереднього запуску
+        try:
+            from app.data.repository import PortfolioRepository
+            repo = PortfolioRepository()
+            has_partial_data = repo.get_latest_quote_date() is not None
+        except Exception:
+            has_partial_data = False
+
+        if has_partial_data:
+            reply = QMessageBox.warning(
+                None,
+                "Помилка синхронізації даних",
+                f"Не вдалося завантажити свіжі дані:\n\n{message}\n\n"
+                "У базі є дані з попереднього сеансу.\n"
+                "Запустити застосунок з наявними даними?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                window = MainWindow()
+                main_window.append(window)
+                window.show()
+                return
+
         QMessageBox.critical(
             None,
             "Помилка ініціалізації",

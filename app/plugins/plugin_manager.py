@@ -7,6 +7,7 @@ from app.plugins.base_optimizer import BaseOptimizer
 
 logger = logging.getLogger(__name__)
 
+
 class PluginManager:
     """
     Manager class responsible for discovering and loading optimization plugins.
@@ -15,12 +16,13 @@ class PluginManager:
     def __init__(self, plugins_dir: str = None):
         """
         Initializes the PluginManager.
-        
+
         Args:
             plugins_dir (str, optional): The directory to scan for plugins.
                                          Defaults to the directory of this file.
         """
         self.plugins_dir = plugins_dir or os.path.dirname(os.path.abspath(__file__))
+        self._cache: Dict[str, Type[BaseOptimizer]] | None = None
 
     def get_plugins(self) -> Dict[str, Type[BaseOptimizer]]:
         """
@@ -30,6 +32,9 @@ class PluginManager:
         Returns:
             Dict[str, Type[BaseOptimizer]]: A dictionary mapped as {"Algorithm name": Class}.
         """
+        if self._cache is not None:
+            return self._cache
+
         discovered_plugins: Dict[str, Type[BaseOptimizer]] = {}
 
         if not os.path.exists(self.plugins_dir):
@@ -41,7 +46,7 @@ class PluginManager:
                 # Skip the core plugin system files
                 if filename in ("base_optimizer.py", "plugin_manager.py"):
                     continue
-                
+
                 module_name = filename[:-3]
                 file_path = os.path.join(self.plugins_dir, filename)
 
@@ -54,15 +59,17 @@ class PluginManager:
 
                         # Inspect module for BaseOptimizer subclasses
                         for name, obj in inspect.getmembers(module, inspect.isclass):
-
-                            base_names = [base.__name__ for base in obj.__bases__]
-
-                            if "BaseOptimizer" in base_names and name != "BaseOptimizer":
-                                # Ensure we only pick classes defined in the plugin file
-                                if obj.__module__ == module_name:
-                                    discovered_plugins[name] = obj
+                            # issubclass() перевіряє весь MRO (а не лише прямих батьків),
+                            # порівнює реальні об'єкти класів, а не рядки імен.
+                            if (
+                                    issubclass(obj, BaseOptimizer)
+                                    and obj is not BaseOptimizer
+                                    and obj.__module__ == module_name
+                            ):
+                                discovered_plugins[name] = obj
 
                 except Exception as e:
                     logger.error(f"Error loading plugin from {filename}: {e}")
 
+        self._cache = discovered_plugins
         return discovered_plugins

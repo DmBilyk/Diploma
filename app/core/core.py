@@ -9,7 +9,7 @@ scripts, and tests use to interact with every subsystem:
 
 * **Database**      – asset / quote CRUD via ``PortfolioRepository``
 * **Optimisation**  – evolutionary search via ``HybridEvoOptimizer``
-* **AI / LSTM**     – neural-network-driven expected returns
+* **AI / PPO**      – reinforcement-learning portfolio agent
 * **Plugins**       – user-supplied optimisation algorithms
 * **Backtesting**   – retrospective portfolio evaluation
 
@@ -23,9 +23,6 @@ from __future__ import annotations
 import datetime
 import logging
 from typing import Any, Dict, List, Optional, Tuple, Type
-
-import numpy as np
-import pandas as pd
 
 from app.algorithms.hybrid_evo_optimizer import (
     HybridEvoOptimizer,
@@ -151,6 +148,12 @@ class PortfolioCore:
                 if i % max(1, total_assets // 10) == 0:
                     current_pct = 90 + int((i / total_assets) * 9)
                     progress_callback(current_pct, f"Запис у БД: {ticker}...")
+
+        if total_assets == 0:
+            logger.warning("sync_market_data: no assets were downloaded or saved.")
+            if progress_callback:
+                progress_callback(100, "Завантаження завершено, але дані не отримано.")
+            return {"status": "empty", "assets_updated": 0}
 
         if progress_callback:
             progress_callback(100, "Синхронізація успішно завершена!")
@@ -480,7 +483,7 @@ class PortfolioCore:
 
         # 6. Persist
         if save:
-            exp_name = experiment_name or f"PPO_{datetime.datetime.now():%Y%m%d_%H%M%S}"
+            exp_name = experiment_name or f"PPO_{datetime.datetime.utcnow():%Y%m%d_%H%M%S}"
             bt_m = report.results[0].metrics if report.results else None
             self.save_experiment(
                 name=exp_name,
@@ -855,7 +858,7 @@ class PortfolioCore:
         # ── 3. Persist (optional) ────────────────────────────────────
         if save:
             exp_name = experiment_name or (
-                f"{method.upper()}_{datetime.datetime.now():%Y%m%d_%H%M%S}"
+                f"{method.upper()}_{datetime.datetime.utcnow():%Y%m%d_%H%M%S}"
             )
             # sharpe_ratio_exante = theoretical (μ,Σ-based) Sharpe from optimizer
             # backtest.sharpe_ratio = ex-post (realized returns) Sharpe
