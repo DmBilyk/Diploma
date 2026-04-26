@@ -44,12 +44,11 @@ class OptimizingSpinner(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(20)
 
-        # Spacer that acts as the canvas for paintEvent arc
+        # This empty widget defines the spinner arc bounds for paintEvent.
         self._spinner_spacer = QWidget()
         self._spinner_spacer.setFixedSize(52, 52)
         layout.addWidget(self._spinner_spacer, 0, Qt.AlignCenter)
 
-        # Primary message
         self.label = QLabel("Processing...")
         font = QFont()
         font.setPointSize(11)
@@ -59,7 +58,6 @@ class OptimizingSpinner(QWidget):
         self.label.setStyleSheet(f"color: {_TEXT_PRI};")
         layout.addWidget(self.label)
 
-        # Secondary detail / progress
         self.detail_label = QLabel("")
         detail_font = QFont()
         detail_font.setPointSize(9)
@@ -114,14 +112,12 @@ class OptimizingSpinner(QWidget):
         radius = min(geom.width(), geom.height()) / 2
         pw     = 3.5
 
-        # Faint background ring
         bg_color = QColor(_ACCENT)
         bg_color.setAlpha(20)
         painter.setPen(Qt.NoPen)
         painter.setBrush(bg_color)
         painter.drawEllipse(center, radius - pw / 2, radius - pw / 2)
 
-        # Rotating gradient arc
         painter.save()
         painter.translate(center)
         painter.rotate(self._angle)

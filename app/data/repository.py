@@ -10,7 +10,7 @@ class PortfolioRepository:
         self.Session = init_db()
 
     def add_asset(self, ticker: str, name: str = None, sector: str = None):
-        """Додає новий актив, якщо його немає."""
+        """Add an asset if it is not already present."""
         with self.Session() as session:
             stmt = sqlite_upsert(Asset).values(ticker=ticker, name=name, sector=sector)
             stmt = stmt.on_conflict_do_nothing(index_elements=['ticker'])
@@ -18,7 +18,7 @@ class PortfolioRepository:
             session.commit()
 
     def get_asset_id(self, ticker: str) -> int:
-        """Отримує ID активу за тікером."""
+        """Return the database ID for a ticker."""
         with self.Session() as session:
             stmt = select(Asset.id).where(Asset.ticker == ticker)
             result = session.execute(stmt).scalar_one_or_none()
@@ -30,7 +30,7 @@ class PortfolioRepository:
             return [row[0] for row in result.all()]
 
     def get_all_assets(self) -> list[dict]:
-        """Отримує всі активи з повною інформацією."""
+        """Return all assets with their available metadata."""
         with self.Session() as session:
             stmt = select(Asset.ticker, Asset.name, Asset.sector)
             result = session.execute(stmt).all()
@@ -40,14 +40,14 @@ class PortfolioRepository:
             ]
 
     def save_quotes_bulk(self, ticker: str, df: pd.DataFrame):
-        """Швидке збереження котирувань."""
+        """Persist a batch of quotes for one ticker."""
         asset_id = self.get_asset_id(ticker)
         if not asset_id:
             self.add_asset(ticker)
             asset_id = self.get_asset_id(ticker)
 
         def _f(val) -> float:
-            """Повертає float, замінюючи NaN на 0.0."""
+            """Convert a value to float, replacing NaN with 0.0."""
             return float(val) if pd.notna(val) else 0.0
 
         records = []
@@ -60,7 +60,7 @@ class PortfolioRepository:
                 "low":       _f(row.get('Low')),
                 "close":     _f(row.get('Close')),
                 "adj_close": _f(row.get('Adj Close')),
-                "volume":    int(_f(row.get('Volume'))),  # _f вже замінила NaN → 0.0, тому int() безпечний
+                "volume":    int(_f(row.get('Volume'))),  # _f has already made NaN safe for int().
             })
 
         if not records:
@@ -83,7 +83,7 @@ class PortfolioRepository:
             session.commit()
 
     def get_price_history(self, tickers: list[str], start_date=None, end_date=None) -> pd.DataFrame:
-        """Для алгоритмів: повертає матрицю цін."""
+        """Return an adjusted-close price matrix for algorithm use."""
         with self.Session() as session:
             query = select(Quote.date, Quote.adj_close, Asset.ticker) \
                 .join(Asset) \
@@ -105,15 +105,15 @@ class PortfolioRepository:
         return pivot_df
 
     def get_latest_quote_date(self) -> datetime.date | None:
-        """Отримує найсвіжішу дату котирувань у базі."""
+        """Return the most recent quote date stored in the database."""
         with self.Session() as session:
             stmt = select(Quote.date).order_by(Quote.date.desc()).limit(1)
             result = session.execute(stmt).scalar_one_or_none()
             return result
 
-    # --- ДОДАНИЙ МЕТОД ---
+    # --- UI helper ---
     def get_quotes(self, ticker: str) -> pd.DataFrame:
-        """Для UI: повертає просту таблицю для одного активу."""
+        """Return a simple quote table for one asset in the UI."""
         with self.Session() as session:
             query = select(Quote.date, Quote.adj_close) \
                 .join(Asset) \
@@ -122,7 +122,7 @@ class PortfolioRepository:
 
             df = pd.read_sql(query, session.connection())
 
-            # Конвертуємо дати в datetime, щоб matplotlib зрозумів
+            # Convert dates to datetime so Matplotlib can plot them.
             if not df.empty:
                 df['date'] = pd.to_datetime(df['date'])
 

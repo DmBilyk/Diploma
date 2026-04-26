@@ -5,11 +5,11 @@ hybrid_evo_optimizer.py
 
 Architecture
 ------------
-1. DataLoader        – fetches tickers / returns from the project database
-2. FitnessEvaluator  – penalised Sharpe-Ratio fitness function
-3. EvoOperators      – selection / crossover / mutation / elitism
-4. LocalRefiner      – constrained gradient-ascent on the top individuals
-5. HybridEvoOptimizer – orchestrates the full pipeline and exposes `run()`
+1. DataLoader         – loads prices and builds expected-return/covariance inputs
+2. FitnessEvaluator   – scores portfolios with a constrained Sharpe objective
+3. EvoOperators       – creates and evolves candidate portfolios
+4. LocalRefiner       – improves the best candidates with gradient search
+5. HybridEvoOptimizer – coordinates the complete optimisation workflow
 """
 
 from __future__ import annotations
@@ -26,13 +26,12 @@ from app.data.repository import PortfolioRepository
 from pypfopt import risk_models, expected_returns
 
 logger = logging.getLogger(__name__)
-# NOTE: logging.basicConfig() must NOT be called here — that is the
-# responsibility of the application entry-point (main.py), not a library module.
+# Library modules should not configure global logging; the application entry
+# point owns logging setup.
 
-# Suppress only the specific numpy overflow / invalid-value warnings that can
-# legitimately arise inside fitness / covariance calculations, and only for
-# code originating in this module.  Global suppression would hide real bugs
-# elsewhere in the application.
+# Fitness and covariance calculations may produce harmless numerical warnings
+# for invalid candidates. Keep the filter narrow so unrelated issues still
+# surface elsewhere.
 warnings.filterwarnings(
     "ignore", category=RuntimeWarning,
     message=r"overflow encountered|invalid value encountered|divide by zero",
@@ -42,7 +41,7 @@ from numba import njit
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  NUMBA JIT KERNELS (Без об'єктів та класів)
+#  NUMBA JIT KERNELS
 # ═══════════════════════════════════════════════════════════════════════════
 @njit(cache=True)
 def _sharpe_numba(w, mu, cov, rf):
@@ -72,9 +71,8 @@ def _evaluate_numba(weights, binary, mu, cov, rf, K, lam_k, lam_neg, lam_conc):
     safe_max_weight = max(0.15, (1.0 / K) + 0.02)
     p_max_w = 100.0 * np.sum(np.maximum(0.0, w - safe_max_weight))
 
-    # Concentration penalty (Herfindahl index).  Pushes weights toward
-    # higher effective-N portfolios.  At lam_conc=0 the term vanishes,
-    # so default behaviour is bit-for-bit identical to the legacy fitness.
+    # Penalise concentrated allocations through the Herfindahl index. With
+    # lam_conc=0, this term has no effect.
     p_conc = lam_conc * np.sum(w * w)
 
     fitness = sr - p_card - p_neg - p_max_w - p_conc
@@ -100,7 +98,7 @@ def _refine_numba(weights, binary, mu, cov, rf, max_iter, lr_init, lr_decay):
     lr = lr_init
     n = len(w)
 
-    # Phase 1: weight-only optimisation
+    # Phase 1: improve weights while keeping the selected assets fixed.
     for _ in range(max_iter):
         grad = _gradient_numba(w, mu, cov, rf)
         grad_masked = grad * b
@@ -121,7 +119,7 @@ def _refine_numba(weights, binary, mu, cov, rf, max_iter, lr_init, lr_decay):
             if lr < 1e-8:
                 break
 
-    # Phase 2: try swapping in better assets
+    # Phase 2: replace weak selected assets with stronger inactive assets.
     failed_swaps = np.zeros(n, dtype=np.bool_)
 
     for _ in range(max_iter // 2):
@@ -197,13 +195,16 @@ def _refine_numba(weights, binary, mu, cov, rf, max_iter, lr_init, lr_decay):
 # ═══════════════════════════════════════════════════════════════════════════
 @dataclasses.dataclass
 class Individual:
-    """Single member of the evolutionary population.
+    """Candidate portfolio inside the evolutionary population.
 
     Attributes
     ----------
-    weights : np.ndarray   – real-valued portfolio weight vector  (n_assets,)
-    binary  : np.ndarray   – binary selection vector               (n_assets,)
-    fitness : float        – evaluated fitness (higher is better)
+    weights : np.ndarray
+        Portfolio weight vector with one value per asset.
+    binary : np.ndarray
+        Asset-selection mask with one value per asset.
+    fitness : float
+        Evaluated objective value. Higher is better.
     """
     weights: np.ndarray
     binary: np.ndarray
@@ -219,14 +220,14 @@ class Individual:
 
 @dataclasses.dataclass
 class OptimizationResult:
-    """Container for the final output of the hybrid optimizer."""
+    """Final portfolio and metrics produced by the hybrid optimizer."""
     weights: Dict[str, float]
     selected_assets: List[str]
     sharpe_ratio: float
     expected_return: float
     portfolio_risk: float
     n_generations: int
-    history: List[float]  # best fitness per generation
+    history: List[float]  # Best fitness value from each generation.
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -237,21 +238,18 @@ def _james_stein_shrink_mu(
     cov: np.ndarray,
     n_obs: int,
 ) -> np.ndarray:
-    """Positive-part James–Stein shrinkage of μ toward the grand mean.
+    """Shrink expected returns toward their cross-sectional mean.
 
-    Returns the shrunk vector
+    The positive-part James-Stein estimator returns:
 
         μ_JS = ν + max(0, 1 − (n−2)·σ̄² / ||μ − ν||²) · (μ − ν)
 
-    where ν is the cross-sectional mean of μ and σ̄² is the average
-    sampling variance of the per-asset estimators (mean of the diagonal
-    of Σ divided by the sample size ``n_obs``).
+    Here ν is the cross-sectional mean of μ, and σ̄² is the average sampling
+    variance of the per-asset estimates.
 
-    Mathematically, James–Stein dominates the sample mean in expected
-    squared error for ``n ≥ 3``.  In a portfolio context this directly
-    suppresses the well-known "noisy μ → over-confident weights → poor
-    out-of-sample Sharpe" failure mode of mean–variance optimisation.
-    Returns ``mu`` unchanged when shrinkage is undefined or unnecessary.
+    In portfolio optimisation this reduces the effect of noisy return
+    estimates, which otherwise tend to create overconfident allocations.
+    Returns ``mu`` unchanged when shrinkage is not defined.
     """
     n = len(mu)
     if n < 3 or n_obs < 2:
@@ -267,7 +265,7 @@ def _james_stein_shrink_mu(
 
 
 class DataLoader:
-    """Retrieve historical return data from the project database."""
+    """Load prices and estimate the optimiser input matrices."""
 
     def __init__(
         self,
@@ -276,12 +274,9 @@ class DataLoader:
         mu_shrinkage: bool = False,
     ):
         self.repo = repo or PortfolioRepository()
-        # Span (in periods) for EWMA expected-return estimation.
-        # Higher values → smoother μ; lower → faster regime adaptation.
+        # Span reserved for EWMA-style return estimators.
         self.ewma_span = ewma_span
-        # Optional James–Stein shrinkage of μ toward the cross-sectional
-        # mean.  Default False → bit-for-bit identical to the legacy
-        # estimator; the thesis description of μ remains accurate.
+        # Optional shrinkage stabilises expected returns when enabled.
         self.mu_shrinkage = mu_shrinkage
 
     def load(
@@ -292,12 +287,12 @@ class DataLoader:
         min_history_frac: float = 0.80,
         frequency: int = 52,
     ) -> Tuple[List[str], np.ndarray, np.ndarray, pd.DataFrame]:
-        """Load data and compute μ (expected returns) and Σ (covariance).
+        """Load prices and compute expected returns and covariance.
 
         Parameters
         ----------
         tickers : list[str] | None
-            Tickers to include.  *None* → all tickers in the database.
+            Tickers to include.  ``None`` uses all database tickers.
         start_date, end_date : str | None
             Optional date filters (ISO-8601 strings).
         min_history_frac : float
@@ -323,7 +318,7 @@ class DataLoader:
 
         prices = prices.sort_index()
 
-        # --- filter tickers with insufficient history ----------------------
+        # --- keep only tickers with enough usable history ------------------
         coverage = prices.notna().sum()
         threshold = int(len(prices) * min_history_frac)
         valid = coverage[coverage >= threshold].index.tolist()
@@ -335,16 +330,15 @@ class DataLoader:
         prices = prices[valid].dropna()
         tickers = list(prices.columns)
 
-        # --- pypfopt: robust μ, Σ -----------------------------------------
-        # Використовуємо класичне середнє геометричне (CAGR) замість EWMA.
-        # Це не дає алгоритму "перегріватися" на останньому році історії.
+        # --- estimate μ and Σ with PyPortfolioOpt -------------------------
+        # CAGR keeps the return estimate less sensitive to the most recent
+        # part of the sample than a short-horizon EWMA.
         mu = expected_returns.mean_historical_return(
             prices, frequency=frequency, compounding=True
         ).values
         cov = risk_models.CovarianceShrinkage(prices, frequency=frequency).ledoit_wolf().values
 
-        # --- optional James–Stein shrinkage of μ -------------------------
-        # Pure addition; default disabled so the legacy μ is unchanged.
+        # --- optionally shrink noisy expected returns ----------------------
         if self.mu_shrinkage:
             mu_pre = mu
             mu = _james_stein_shrink_mu(mu, cov, n_obs=len(prices))
@@ -366,7 +360,7 @@ class DataLoader:
 #  2. FITNESS EVALUATOR
 # ═══════════════════════════════════════════════════════════════════════════
 class FitnessEvaluator:
-    """Penalised Sharpe Ratio fitness function.
+    """Evaluate portfolios with a penalised Sharpe objective.
 
     fitness = sharpe_ratio
               - λ₁·|Σw − 1|
@@ -374,11 +368,8 @@ class FitnessEvaluator:
               - λ₃·Σmax(0, −w)
               - λ₄·Σw²            (Herfindahl concentration penalty, optional)
 
-    The concentration penalty defaults to 0 — when disabled the formula
-    is bit-for-bit identical to the legacy fitness.  Setting
-    ``penalty_concentration > 0`` drives the GA toward more diversified
-    portfolios, which empirically improves Calmar, VaR/CVaR and Win Rate
-    without changing the optimiser's architecture.
+    The concentration penalty is optional. When it is zero, the objective keeps
+    the original behaviour; positive values encourage broader diversification.
     """
 
     def __init__(
@@ -402,12 +393,12 @@ class FitnessEvaluator:
         self.lam_conc = penalty_concentration
         self.n = len(mu)
 
-    # ----- core -----------------------------------------------------------
+    # ----- core scoring ---------------------------------------------------
     def sharpe(self, w: np.ndarray) -> float:
         return _sharpe_numba(w, self.mu, self.cov, self.rf)
 
     def evaluate(self, ind: Individual) -> float:
-        """Делегуємо важкі обчислення у скомпільоване ядро."""
+        """Evaluate one individual through the compiled scoring kernel."""
         fitness, w = _evaluate_numba(
             ind.weights, ind.binary,
             self.mu, self.cov, self.rf,
@@ -417,7 +408,7 @@ class FitnessEvaluator:
         ind.weights = w
         return ind.fitness
 
-    # ----- gradient (numerical) -------------------------------------------
+    # ----- analytical gradient --------------------------------------------
     def gradient(self, w: np.ndarray) -> np.ndarray:
         return _gradient_numba(w, self.mu, self.cov, self.rf)
 
@@ -426,7 +417,7 @@ class FitnessEvaluator:
 #  3. EVOLUTIONARY OPERATORS
 # ═══════════════════════════════════════════════════════════════════════════
 class EvoOperators:
-    """Selection, crossover, mutation, and population management."""
+    """Create and transform individuals during evolutionary search."""
 
     def __init__(
         self,
@@ -442,7 +433,7 @@ class EvoOperators:
     ):
         self.n = n_assets
         self.K = max_cardinality
-        self._cov = cov  # used for risk-adjusted seeding in init_population
+        self._cov = cov  # Used for risk-adjusted population seeding.
         self.tourn = tournament_size
         self.cx_alpha = crossover_alpha
         self.mut_sigma = mutation_sigma
@@ -450,22 +441,20 @@ class EvoOperators:
         self.bit_flip = bit_flip_prob
         self.rng = rng or np.random.default_rng()
 
-        # Baselines for the variance thermostat (Upgrade 2).
-        # The thermostat heats / cools mut_sigma and mut_prob relative
-        # to these immutable reference values.
+        # Mutation baselines used when the thermostat cools exploration.
         self._base_mut_sigma = mutation_sigma
         self._base_mut_prob = mutation_prob
 
     # ----- initialisation -------------------------------------------------
     def random_individual(self) -> Individual:
         """Create a random feasible individual."""
-        # Бінарна маска: випадкове число активів від 1 до K, вибраних без заміни.
+        # Select a random number of assets from the allowed cardinality range.
         k = self.rng.integers(1, self.K + 1)
         chosen = self.rng.choice(self.n, size=k, replace=False)
         binary = np.zeros(self.n, dtype=np.float64)
         binary[chosen] = 1.0
 
-        # Щоб в сумі було 1, генеруємо випадкові ваги для вибраних активів з діріхле-розподілу.
+        # Dirichlet weights are non-negative and sum to one by construction.
         raw = self.rng.dirichlet(np.ones(k))
         weights = np.zeros(self.n, dtype=np.float64)
         weights[chosen] = raw
@@ -473,15 +462,14 @@ class EvoOperators:
         return Individual(weights=weights, binary=binary)
 
     def init_population(self, pop_size: int, mu: Optional[np.ndarray] = None) -> List[Individual]:
-        """Ініціалізуємо популяцію, частково посіваючи її "розумними" індивідами на основі μ."""
+        """Initialise the population with random and return-aware candidates."""
         population = []
 
         if mu is not None:
-            # Персеяємо перші ~20% популяції індивідами, які вибирають топ-активи за μ (з урахуванням ризику, якщо є Σ).
+            # Seed about 20% of the population with high-scoring assets.
             n_seeded = max(1, pop_size // 5)
-            # K-найкращі активи за μ, відсортовані з урахуванням ризику (якщо є Σ).
-            # Використовуємо "шарп-проксі" (μ / σ) для ранжування, щоб врахувати ризик. Якщо Σ відсутня, просто ранжуємо за μ.
-            # Щоб уникнути ділення на нуль, додаємо невеликий ε до стандартного відхилення.
+            # Rank by a Sharpe-like proxy when covariance is available;
+            # otherwise rank by expected return alone.
             if self._cov is not None:
                 per_asset_std = np.sqrt(np.maximum(np.diag(self._cov), 1e-12))
                 sharpe_proxy = mu / per_asset_std
@@ -490,9 +478,9 @@ class EvoOperators:
             top_idx = np.argsort(sharpe_proxy)[::-1]
 
             for i in range(n_seeded):
-                # Each seeded individual takes top-k random subset from top assets
+                # Use a random subset of the best-ranked assets for diversity.
                 k = self.rng.integers(2, min(self.K, 20) + 1)
-                # Bias towards top assets but add randomness
+                # Limit the pool so seeds remain biased toward strong assets.
                 n_top = min(50, self.n)
                 chosen = self.rng.choice(top_idx[:n_top], size=k, replace=False)
                 binary = np.zeros(self.n, dtype=np.float64)
@@ -502,7 +490,7 @@ class EvoOperators:
                 weights[chosen] = raw
                 population.append(Individual(weights=weights, binary=binary))
 
-        # Fill rest randomly
+        # Fill the remaining slots with fully random feasible candidates.
         while len(population) < pop_size:
             population.append(self.random_individual())
 
@@ -510,23 +498,23 @@ class EvoOperators:
 
     # ----- selection ------------------------------------------------------
     def tournament_select(self, population: List[Individual]) -> Individual:
-        """Груповий турнір настунпого батька."""
+        """Select one parent with tournament selection."""
         idxs = self.rng.choice(len(population), size=self.tourn, replace=False)
         best = max(idxs, key=lambda i: population[i].fitness)
         return population[best].copy()
 
     # ----- crossover (blend / BLX-α) -------------------------------------
     def crossover(self, p1: Individual, p2: Individual) -> Tuple[Individual, Individual]:
-        """Blend crossover for weights + uniform crossover for binary."""
+        """Blend parent weights and mix parent selection masks."""
         alpha = self.cx_alpha
-        # Weights: BLX-α
+        # BLX-alpha explores around both parents' weight values.
         lo = np.minimum(p1.weights, p2.weights) - alpha * np.abs(p1.weights - p2.weights)
         hi = np.maximum(p1.weights, p2.weights) + alpha * np.abs(p1.weights - p2.weights)
         lo = np.maximum(lo, 0.0)
         c1_w = self.rng.uniform(lo, hi)
         c2_w = self.rng.uniform(lo, hi)
 
-        # Binary: uniform crossover
+        # Uniform crossover chooses each selection bit from either parent.
         mask = self.rng.random(self.n) < 0.5
         c1_b = np.where(mask, p1.binary, p2.binary)
         c2_b = np.where(mask, p2.binary, p1.binary)
@@ -539,13 +527,13 @@ class EvoOperators:
 
     # ----- mutation -------------------------------------------------------
     def mutate(self, ind: Individual) -> Individual:
-        """Gaussian mutation for weights, bit-flip for binary."""
-        # Weight mutation
+        """Apply Gaussian weight noise and bit-flip selection changes."""
+        # Add small random changes to selected weight genes.
         mask = self.rng.random(self.n) < self.mut_prob
         noise = self.rng.normal(0, self.mut_sigma, size=self.n) * mask
         ind.weights = np.maximum(ind.weights + noise, 0.0)
 
-        # Bit-flip mutation
+        # Flip selection bits to explore different asset sets.
         flips = self.rng.random(self.n) < self.bit_flip
         ind.binary = np.where(flips, 1.0 - ind.binary, ind.binary)
 
@@ -554,26 +542,26 @@ class EvoOperators:
 
     # ----- repair ---------------------------------------------------------
     def _repair(self, ind: Individual) -> None:
-        """Ensure feasibility: w ≥ 0, Σw = 1, Σb ≤ K."""
+        """Restore non-negative weights, full investment, and cardinality."""
         ind.weights = np.maximum(ind.weights, 0.0)
 
-        # Enforce cardinality
+        # Keep no more than K active assets.
         if ind.binary.sum() > self.K:
             active = np.where(ind.binary > 0.5)[0]
             keep = self.rng.choice(active, size=self.K, replace=False)
             ind.binary[:] = 0.0
             ind.binary[keep] = 1.0
 
-        # Ensure at least one asset is selected
+        # Guarantee that the portfolio is never empty.
         if ind.binary.sum() == 0:
             idx = self.rng.integers(0, self.n)
             ind.binary[idx] = 1.0
             ind.weights[idx] = 1.0
 
-        # Zero out deselected weights
+        # Remove weight from inactive assets.
         ind.weights *= ind.binary
 
-        # Normalise
+        # Re-normalise the active weights.
         w_sum = ind.weights.sum()
         if w_sum > 1e-12:
             ind.weights /= w_sum
@@ -585,12 +573,12 @@ class EvoOperators:
     def heat_up(
         self, factor: float = 1.25, sigma_cap: float = 0.30, prob_cap: float = 0.60,
     ) -> None:
-        """Increase mutation rates by *factor* (stagnation detected)."""
+        """Increase mutation rates when the population has stagnated."""
         self.mut_sigma = min(self.mut_sigma * factor, sigma_cap)
         self.mut_prob = min(self.mut_prob * factor, prob_cap)
 
     def cool_down(self, decay: float = 0.95) -> None:
-        """Decay mutation rates back toward their baselines."""
+        """Move mutation rates back toward their configured baselines."""
         self.mut_sigma = max(self.mut_sigma * decay, self._base_mut_sigma)
         self.mut_prob = max(self.mut_prob * decay, self._base_mut_prob)
 
@@ -600,7 +588,7 @@ class EvoOperators:
         population: List[Individual],
         n_elite: int,
     ) -> List[Individual]:
-        """Return copies of the top *n_elite* individuals."""
+        """Return copies of the strongest individuals."""
         ranked = sorted(population, key=lambda x: x.fitness, reverse=True)
         return [ind.copy() for ind in ranked[:n_elite]]
 
@@ -609,13 +597,12 @@ class EvoOperators:
 #  4. LOCAL REFINER
 # ═══════════════════════════════════════════════════════════════════════════
 class LocalRefiner:
-    """Constrained gradient-ascent refinement of portfolio weights.
+    """Improve strong candidates with constrained gradient ascent.
 
     For each candidate the refiner:
-      1. Computes the numerical Sharpe-Ratio gradient.
-      2. Takes a step in the gradient direction (projected onto the
-         feasible simplex: w ≥ 0, Σw = 1).
-      3. Repeats for *max_iter* steps with a decaying learning rate.
+      1. Computes the Sharpe-ratio gradient.
+      2. Adjusts weights while preserving long-only full investment.
+      3. Tries asset swaps when inactive assets have stronger gradient signals.
     """
 
     def __init__(
@@ -631,7 +618,7 @@ class LocalRefiner:
         self.lr_decay = lr_decay
 
     def refine(self, ind: Individual) -> Individual:
-        """Передаємо розплющені параметри до Numba."""
+        """Run the compiled local-search routine for one individual."""
         best = ind.copy()
 
         new_w, new_b = _refine_numba(
@@ -648,7 +635,7 @@ class LocalRefiner:
     # ----- simplex projection ---------------------------------------------
     @staticmethod
     def _project_simplex(w: np.ndarray) -> np.ndarray:
-        """Project *w* onto the non-negative simplex {x ≥ 0, Σx = 1}.
+        """Project ``w`` onto the non-negative simplex.
 
         Uses the efficient O(n log n) algorithm by Duchi et al. (2008).
         """
@@ -664,19 +651,18 @@ class LocalRefiner:
 #  5. HYBRID EVOLUTIONARY OPTIMIZER
 # ═══════════════════════════════════════════════════════════════════════════
 class HybridEvoOptimizer:
-    """Hybrid evolutionary portfolio optimizer.
+    """Hybrid evolutionary optimizer for constrained portfolios.
 
     Pipeline
     --------
-    1. Load market data & compute μ, Σ.
+    1. Load market data and compute μ, Σ.
     2. Initialise a random feasible population.
     3. For each generation:
-       a. Evaluate fitness (penalised Sharpe Ratio).
+       a. Evaluate penalised Sharpe fitness.
        b. Preserve elites.
-       c. Build new generation via tournament selection → crossover → mutation.
-    4. After evolution completes, refine the top-M individuals with
-       constrained gradient ascent.
-    5. Return the best solution.
+       c. Build the next generation with selection, crossover, and mutation.
+    4. Refine top candidates with local gradient search and SLSQP polish.
+    5. Return the best feasible portfolio.
 
     Parameters
     ----------
@@ -712,22 +698,17 @@ class HybridEvoOptimizer:
         local_lr: float = 0.05,
         local_iter: int = 30,
         seed: Optional[int] = None,
-        # Penalty hyper-parameters
+        # Penalty strengths for constraints inside the fitness function.
         penalty_weights: float = 100.0,
         penalty_cardinality: float = 50.0,
         penalty_negativity: float = 200.0,
-        # Optional concentration penalty (Σw²).  Default 0 → identical to
-        # legacy behaviour.  Recommended range when enabled: 0.05 – 0.5.
+        # Optional Herfindahl concentration penalty. Zero disables it.
         penalty_concentration: float = 0.0,
-        # EWMA span for expected-return estimation (Upgrade 1)
+        # Expected-return smoothing parameter passed to the data loader.
         ewma_span: int = 52,
-        # Optional James–Stein shrinkage of μ toward its cross-sectional
-        # mean.  Default False → identical to legacy behaviour.  Enabling
-        # this is the highest-impact, lowest-risk improvement: it tames
-        # estimation noise in expected returns and typically lifts the
-        # out-of-sample Sharpe / Calmar of the resulting portfolio.
+        # Optional James-Stein shrinkage for noisy expected-return estimates.
         mu_shrinkage: bool = False,
-        # Variance thermostat threshold (Upgrade 2)
+        # Fitness variance below this threshold increases exploration.
         variance_threshold: float = 1e-5,
     ):
         if pop_size < 2:
@@ -772,15 +753,20 @@ class HybridEvoOptimizer:
         frequency: int = 52,
         repo: Optional[PortfolioRepository] = None,
     ) -> OptimizationResult:
-        """Execute the full hybrid optimisation pipeline.
+        """Run the full hybrid optimisation pipeline.
 
         Parameters
         ----------
-        tickers    : list[str] | None – subset of tickers (None → all in DB)
-        start_date : str | None       – ISO-8601 start filter
-        end_date   : str | None       – ISO-8601 end filter
-        frequency  : int              – annualisation factor (52=weekly)
-        repo       : PortfolioRepository | None – optional custom repo
+        tickers    : list[str] | None
+            Subset of tickers. ``None`` uses all database tickers.
+        start_date : str | None
+            Optional ISO-8601 start filter.
+        end_date   : str | None
+            Optional ISO-8601 end filter.
+        frequency  : int
+            Annualisation factor. Use 52 for weekly data.
+        repo       : PortfolioRepository | None
+            Optional repository instance for tests or custom data access.
 
         Returns
         -------
@@ -788,7 +774,7 @@ class HybridEvoOptimizer:
         """
         rng = np.random.default_rng(self.seed)
 
-        # ── 1. Data loading ───────────────────────────────────────────────
+        # ── 1. Load optimisation inputs ──────────────────────────────────
         loader = DataLoader(
             repo=repo,
             ewma_span=self.ewma_span,
@@ -803,10 +789,10 @@ class HybridEvoOptimizer:
         n_assets = len(tickers)
         logger.info("Assets after filtering: %d", n_assets)
 
-        # Clamp cardinality to number of available assets
+        # Cardinality cannot exceed the number of available assets.
         K = min(self.K, n_assets)
 
-        # ── 2. Build components ───────────────────────────────────────────
+        # ── 2. Build evaluator, operators, and local refiner ─────────────
         evaluator = FitnessEvaluator(
             mu=mu,
             cov=cov,
@@ -836,28 +822,27 @@ class HybridEvoOptimizer:
             lr_init=self.local_lr,
         )
 
-        # ── 3. Evolutionary loop (with variance thermostat) ────────────────
+        # ── 3. Evolve the population with adaptive mutation ──────────────
         population = operators.init_population(self.pop_size, mu=mu)
         history: List[float] = []
 
         for gen in range(self.n_gen):
-            # Evaluate
+            # Score the current population before selection.
             for ind in population:
                 evaluator.evaluate(ind)
 
             best_fit = max(ind.fitness for ind in population)
             history.append(best_fit)
 
-            # ── Variance thermostat ──────────────────────────────────
-            # Instead of a destructive 50 % restart, smoothly adjust
-            # mutation intensity based on population fitness variance.
+            # Increase exploration when fitness variance collapses; reduce it
+            # once the population is diverse enough again.
             pop_variance = np.var([ind.fitness for ind in population])
 
             if pop_variance < self.variance_threshold:
-                # Stagnation → heat up (increase exploration)
+                # Low variance suggests stagnation, so explore more.
                 operators.heat_up()
             else:
-                # Healthy diversity → cool down toward baseline
+                # Healthy variance allows mutation to return toward baseline.
                 operators.cool_down()
 
             if gen % 25 == 0 or gen == self.n_gen - 1:
@@ -869,10 +854,10 @@ class HybridEvoOptimizer:
                     operators.mut_sigma, operators.mut_prob,
                 )
 
-            # Elitism
+            # Preserve the strongest individuals unchanged.
             elites = operators.elitism(population, self.n_elite)
 
-            # Build next generation
+            # Fill the next generation from selected and mutated parents.
             next_gen: List[Individual] = list(elites)
 
             while len(next_gen) < self.pop_size:
@@ -887,11 +872,11 @@ class HybridEvoOptimizer:
 
             population = next_gen
 
-        # Final evaluation
+        # Score the final population before post-processing.
         for ind in population:
             evaluator.evaluate(ind)
 
-        # ── 4. Local refinement ───────────────────────────────────────────
+        # ── 4. Refine the strongest candidates locally ───────────────────
         top_inds = sorted(population, key=lambda x: x.fitness, reverse=True)[
             : self.top_m
         ]
@@ -903,7 +888,7 @@ class HybridEvoOptimizer:
         for ind in top_inds:
             refined.append(refiner.refine(ind))
 
-        # ── 4b. Scipy polish on the very best candidate ───────────────────
+        # ── 4b. Polish the champion with SLSQP when SciPy is available ───
         try:
             from scipy.optimize import minimize
 
@@ -931,10 +916,10 @@ class HybridEvoOptimizer:
                 w_full = np.zeros(n_assets)
                 w_full[active] = np.maximum(res.x, 0)
                 w_sum = w_full.sum()
-                if w_sum > 1e-12:          # guard: scipy may return all-zero solution
+                if w_sum > 1e-12:          # Guard against all-zero SciPy output.
                     w_full /= w_sum
-                    # Build a temporary Individual to evaluate penalised fitness,
-                    # so we compare apples-to-apples (fitness vs fitness).
+                    # Evaluate the polished weights with the same penalised
+                    # objective used by the evolutionary loop.
                     from copy import deepcopy
                     candidate = deepcopy(champion_pre)
                     candidate.weights = w_full
@@ -945,14 +930,14 @@ class HybridEvoOptimizer:
                         logger.info("Scipy SLSQP improved Sharpe to %.4f", champion_pre.fitness)
             refined.append(champion_pre)
         except ImportError:
-            pass  # scipy not installed — skip polish step
-        except Exception as exc:           # catch any numerical failure gracefully
+            pass  # SLSQP polish is optional when SciPy is unavailable.
+        except Exception as exc:           # Numerical failures should not abort GA output.
             logger.warning("Scipy polish failed and was skipped: %s", exc)
 
-        # Overall best
+        # Pick the best candidate after refinement and optional polish.
         champion = max(refined, key=lambda x: x.fitness)
 
-        # ── 5. Assemble result ────────────────────────────────────────────
+        # ── 5. Assemble user-facing result ───────────────────────────────
         w = champion.weights
         selected_mask = champion.binary > 0.5
         selected_tickers = [t for t, s in zip(tickers, selected_mask) if s]
@@ -963,7 +948,7 @@ class HybridEvoOptimizer:
         port_risk = float(np.sqrt(max(port_var, 0.0)))
         sharpe = (port_return - self.rf) / port_risk if port_risk > 1e-12 else 0.0
 
-        # Filter out negligible weights, then renormalise so Σw = 1.0 exactly.
+        # Drop negligible positions and normalise the reported weights.
         raw_dict = {
             t: float(wt) for t, wt in zip(selected_tickers, selected_weights) if wt > 1e-6
         }
@@ -986,7 +971,7 @@ class HybridEvoOptimizer:
         self._log_result(result)
         return result
 
-    # ----- pretty-print ---------------------------------------------------
+    # ----- result logging -------------------------------------------------
     @staticmethod
     def _log_result(result: OptimizationResult) -> None:
         logger.info("=" * 60)
@@ -1009,20 +994,20 @@ class HybridEvoOptimizer:
 #  CONVENIENCE ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════
 def main() -> OptimizationResult:
-    """Quick-run with sensible defaults — useful for experimentation."""
+    """Run the optimizer with demonstration defaults."""
     optimizer = HybridEvoOptimizer(
         pop_size=200,
         n_generations=200,
         max_cardinality=15,
         risk_free_rate=0.02,
-        n_elite=10,          # Більше еліти
-        top_m_refine=20,     # Більше кандидатів для рафінування
-        tournament_size=5,   # Сильніший відбір
+        n_elite=10,          # Preserve more high-quality candidates.
+        top_m_refine=20,     # Refine a wider set of finalists.
+        tournament_size=5,   # Apply stronger selection pressure.
         mutation_prob=0.30,
         bit_flip_prob=0.15,
         crossover_alpha=0.7,
-        local_lr=0.1,        # Більший початковий lr для рафінера
-        local_iter=50,       # Більше ітерацій рафінування
+        local_lr=0.1,        # Start local refinement with a larger step.
+        local_iter=50,       # Give local refinement more iterations.
         seed=42,
     )
     return optimizer.run()

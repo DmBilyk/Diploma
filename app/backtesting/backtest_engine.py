@@ -2,11 +2,11 @@
 backtest_engine.py
 ==================
 
-Universal retrospective backtesting engine.
+Retrospective backtesting engine for portfolio strategies.
 
 Accepts ready-made portfolios (weight dictionaries from any optimiser),
-a date range, and a budget.  Simulates historical performance and
-computes standard financial metrics.
+a date range, and an initial budget. It simulates historical performance,
+benchmarks each strategy, and computes financial metrics.
 
 Usage
 -----
@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class PortfolioSpec:
-    """Input descriptor for a single portfolio.
+    """Input descriptor for one portfolio strategy.
 
     Attributes
     ----------
@@ -61,7 +61,7 @@ class PortfolioSpec:
 
 @dataclass(frozen=True)
 class BacktestMetrics:
-    """Aggregated financial metrics for a backtest run.
+    """Aggregated financial metrics for one simulated equity curve.
 
     All rates are expressed as decimals (0.12 = 12 %).
     """
@@ -75,10 +75,9 @@ class BacktestMetrics:
     start_value: float
     end_value: float
 
-    # ── Extended metrics (Phase 1) ────────────────────────────────────
-    # All default to NaN / 0 so old constructors and serialised reports
-    # remain valid.  Benchmark-dependent metrics are only populated when
-    # a benchmark return series is supplied to `_compute_metrics`.
+    # ── Extended metrics ──────────────────────────────────────────────
+    # Defaults keep older constructors and saved reports loadable.
+    # Benchmark-dependent metrics are filled only when benchmark values exist.
     calmar_ratio: float = float("nan")
     information_ratio: float = float("nan")
     tracking_error: float = float("nan")
@@ -95,7 +94,7 @@ class BacktestMetrics:
 
 @dataclass
 class BacktestResult:
-    """Result for a single portfolio.
+    """Simulation result for one portfolio.
 
     ``benchmark`` is preserved for backward compatibility — it always points
     to the *first* entry of ``benchmarks`` (typically the equal-weight
@@ -112,7 +111,7 @@ class BacktestResult:
 
 @dataclass
 class BacktestReport:
-    """Aggregated report containing all portfolio results + benchmark."""
+    """Report containing strategy results, metadata, and optional benchmark."""
 
     results: List[BacktestResult]
     benchmark: Optional[BacktestResult]
@@ -120,9 +119,9 @@ class BacktestReport:
     end_date: str
     initial_capital: float
 
-    # ── Persistence / export (Phase 2) ────────────────────────────────
-    # Implementations live in app.backtesting.io to keep this dataclass
-    # minimal.  Imported lazily to avoid a circular import.
+    # ── Persistence / export ─────────────────────────────────────────
+    # I/O functions live in app.backtesting.io so this dataclass stays small.
+    # Imports are lazy to avoid circular dependencies.
 
     def to_dict(self) -> dict:
         from app.backtesting import io as _io
@@ -150,7 +149,7 @@ class BacktestReport:
         from app.backtesting import io as _io
         _io.save_html(self, path)
 
-    # ── Statistical comparison (Phase 6) ──────────────────────────────
+    # ── Statistical comparison ───────────────────────────────────────
 
     def compare(
         self,
@@ -161,7 +160,7 @@ class BacktestReport:
         ci: float = 0.95,
         seed: Optional[int] = None,
     ) -> dict:
-        """Run JKM + paired t + bootstrap CI on two named results.
+        """Compare two named strategy results statistically.
 
         Looks up portfolios by ``spec.name`` from :attr:`results` (only the
         strategies — benchmarks are not addressable here; pass them as a
@@ -186,7 +185,7 @@ class BacktestReport:
         ci: float = 0.95,
         seed: Optional[int] = None,
     ) -> dict:
-        """Pairwise comparison between every strategy in :attr:`results`."""
+        """Compare every pair of strategy results in this report."""
         from app.backtesting import statistics as _stats
         return _stats.compare_all_pairs(
             self.results,
@@ -195,13 +194,13 @@ class BacktestReport:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  WALK-FORWARD (Phase 3)
+#  WALK-FORWARD
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 @dataclass(frozen=True)
 class WalkForwardWindow:
-    """One in-sample / out-of-sample window in a walk-forward run."""
+    """One train/test window in a walk-forward evaluation."""
 
     train_start: pd.Timestamp
     train_end: pd.Timestamp
@@ -264,7 +263,7 @@ class RobustnessReport:
 def _aggregate_robustness(
     seed_reports: List["BacktestReport"],
 ) -> Dict[str, Dict[str, Dict[str, float]]]:
-    """Per-algorithm summary stats across seeds, including box-plot percentiles."""
+    """Summarise each algorithm across seed-specific reports."""
     import math
 
     by_algo: Dict[str, Dict[str, List[float]]] = {}
@@ -300,9 +299,8 @@ def _aggregate_robustness(
     return aggregated
 
 
-# Metrics aggregated across windows.  Excludes start_value / end_value
-# because they're absolute capital snapshots — a "mean end_value" across
-# windows is meaningless.
+# Metrics aggregated across windows or seeds. Absolute capital snapshots are
+# excluded because averaging start/end values across windows is not meaningful.
 _AGGREGATABLE_METRICS = (
     "total_return", "cagr", "annualised_volatility", "max_drawdown",
     "sharpe_ratio", "sortino_ratio", "calmar_ratio",
@@ -316,7 +314,7 @@ _AGGREGATABLE_METRICS = (
 def _aggregate_walk_forward(
     window_reports: List["BacktestReport"],
 ) -> Dict[str, Dict[str, Dict[str, float]]]:
-    """Collapse per-window metrics into per-algorithm summary statistics."""
+    """Summarise each algorithm across walk-forward windows."""
     import math
 
     by_algo: Dict[str, Dict[str, List[float]]] = {}
@@ -352,10 +350,10 @@ def _aggregate_walk_forward(
 #  CONSTANTS
 # ═══════════════════════════════════════════════════════════════════════════
 
-_MIN_SERIES_LENGTH = 4          # minimum observations to compute metrics
-_ANNUALISATION_FACTOR = 52      # weekly data → annual
-_EPSILON = 1e-12                # guard against division by zero
-_WEIGHT_SUM_TOLERANCE = 0.01    # acceptable deviation of Σw from 1.0
+_MIN_SERIES_LENGTH = 4          # Minimum observations needed for metrics.
+_ANNUALISATION_FACTOR = 52      # Default annualisation for weekly data.
+_EPSILON = 1e-12                # Division-by-zero guard.
+_WEIGHT_SUM_TOLERANCE = 0.01    # Accepted deviation from fully invested weights.
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -364,7 +362,7 @@ _WEIGHT_SUM_TOLERANCE = 0.01    # acceptable deviation of Σw from 1.0
 
 
 class BacktestEngine:
-    """Universal retrospective backtesting engine.
+    """Run retrospective simulations for one or more portfolios.
 
     Parameters
     ----------
@@ -414,7 +412,7 @@ class BacktestEngine:
         self._rf = float(risk_free_rate)
         self._repo = repo
         self._rebalance_every = rebalance_every
-        # Default preserves legacy behaviour: one per-portfolio EW benchmark.
+        # Default benchmark remains one equal-weight comparison per portfolio.
         self._benchmarks: List[Benchmark] = (
             list(benchmarks) if benchmarks else [EqualWeightBenchmark()]
         )
@@ -424,16 +422,15 @@ class BacktestEngine:
     # ------------------------------------------------------------------
 
     def run(self, portfolios: List[PortfolioSpec]) -> BacktestReport:
-        """Execute the backtest for every portfolio in *portfolios*.
+        """Run the backtest for every supplied portfolio.
 
         Returns a :class:`BacktestReport` containing per-portfolio metrics,
-        value series, per-portfolio equal-weight benchmarks, and a
-        (deprecated) global equal-weight benchmark.
+        value series, and per-portfolio benchmarks.
         """
         if not portfolios:
             raise ValueError("At least one PortfolioSpec is required")
 
-        # Collect every ticker mentioned by any portfolio.
+        # Load every ticker needed by any portfolio.
         all_tickers = sorted(
             {t for spec in portfolios for t in spec.weights}
         )
@@ -456,7 +453,7 @@ class BacktestEngine:
         start_date: str,
         end_date: str,
     ) -> BacktestReport:
-        """Backtest a list of portfolios against an already-loaded price matrix.
+        """Run portfolios against an already-loaded price matrix.
 
         Used by :meth:`run` (whole-period) and :meth:`run_walk_forward`
         (per-window) so the simulation logic is not duplicated.
@@ -468,9 +465,7 @@ class BacktestEngine:
                 spec.weights, prices, self._capital, self._rebalance_every,
             )
 
-            # Per-portfolio benchmarks — one per configured Benchmark.
-            # All benchmarks see the same asset universe as the strategy
-            # under test, so comparisons remain like-for-like.
+            # Build benchmarks on the same asset universe as the strategy.
             p_tickers = list(spec.weights.keys())
             spec_prices = prices[p_tickers]
             bench_results: List[BacktestResult] = []
@@ -500,9 +495,7 @@ class BacktestEngine:
                     portfolio_values=b_vals,
                 ))
 
-            # Primary benchmark (legacy slot) = first successful benchmark,
-            # which under default config is equal-weight — matches the
-            # historical contract and keeps existing tests / serialisers happy.
+            # Keep the first successful benchmark in the legacy singular slot.
             primary = bench_results[0] if bench_results else None
             primary_vals = primary.portfolio_values if primary is not None else None
 
@@ -523,14 +516,14 @@ class BacktestEngine:
 
         return BacktestReport(
             results=results,
-            benchmark=None,   # global EW benchmark removed; use BacktestResult.benchmark
+            benchmark=None,   # Global benchmark is deprecated; use result.benchmark.
             start_date=start_date,
             end_date=end_date,
             initial_capital=self._capital,
         )
 
     # ------------------------------------------------------------------
-    #  Walk-forward (Phase 3)
+    #  Walk-forward
     # ------------------------------------------------------------------
 
     def run_walk_forward(
@@ -542,13 +535,13 @@ class BacktestEngine:
         step: Optional[int] = None,
         expanding: bool = False,
     ) -> "WalkForwardReport":
-        """Rolling / expanding walk-forward backtest.
+        """Run a rolling or expanding walk-forward backtest.
 
         Parameters
         ----------
         spec_factory
-            Callable invoked once per window with the **training-slice price
-            DataFrame**.  Must return one or more :class:`PortfolioSpec`
+            Callable invoked once per window with the training-slice price
+            DataFrame. Must return one or more :class:`PortfolioSpec`
             objects (one per algorithm being compared).  Use the same names
             across windows so per-algorithm aggregation works.
         universe
@@ -557,7 +550,7 @@ class BacktestEngine:
             is constant.
         train_periods, test_periods
             Length of the in-sample and out-of-sample slices, measured in
-            **price-index rows** (so weekly data → 52 ≈ 1 year).
+            price-index rows. For weekly data, 52 rows is about one year.
         step
             Rows to advance between windows.  Defaults to ``test_periods``
             (non-overlapping test windows).
@@ -573,7 +566,7 @@ class BacktestEngine:
 
         Notes
         -----
-        * The engine's ``start_date`` / ``end_date`` define the *outer*
+        * The engine's ``start_date`` / ``end_date`` define the outer
           range from which windows are carved; nothing is loaded outside it.
         * Look-ahead bias is structurally prevented: ``spec_factory`` only
           ever sees the training slice; the backtest runs against the
@@ -668,7 +661,7 @@ class BacktestEngine:
         )
 
     # ------------------------------------------------------------------
-    #  Robustness / multi-seed (Phase 4)
+    #  Robustness / multi-seed
     # ------------------------------------------------------------------
 
     def run_with_seeds(
@@ -676,11 +669,10 @@ class BacktestEngine:
         spec_factory: Callable[[int], List[PortfolioSpec]],
         seeds: Sequence[int],
     ) -> "RobustnessReport":
-        """Run the same evaluation N times with different RNG seeds.
+        """Run the same evaluation multiple times with different seeds.
 
-        Designed for stochastic optimisers (PPO, Hybrid Evo) where a
-        single run does not characterise the algorithm — variance across
-        seeds is the honest answer.
+        Designed for stochastic optimisers where seed-to-seed variation is an
+        important part of the result.
 
         Parameters
         ----------
@@ -758,7 +750,7 @@ class BacktestEngine:
     # ------------------------------------------------------------------
 
     def _load_prices(self, tickers: List[str]) -> pd.DataFrame:
-        """Fetch price matrix from the repository and validate it."""
+        """Load and clean the price matrix for the configured date range."""
         if self._repo is None:
             self._repo = PortfolioRepository()
 
@@ -777,8 +769,8 @@ class BacktestEngine:
         df.index = pd.to_datetime(df.index)
         df = df.sort_index()
 
-        # Forward-fill NaN gaps so one missing price does not
-        # contaminate the entire value series downstream.
+        # Forward-fill gaps so isolated missing prices do not break the value
+        # series. Assets without an opening price are still dropped.
         n_nan_before = int(df.isna().sum().sum())
         if n_nan_before > 0:
             df = df.ffill()
@@ -810,7 +802,7 @@ class BacktestEngine:
         initial_capital: float,
         rebalance_every: Optional[int] = None,
     ) -> pd.Series:
-        """Convert weights + price matrix → portfolio value series.
+        """Convert weights and prices into a portfolio value series.
 
         Parameters
         ----------
@@ -822,17 +814,16 @@ class BacktestEngine:
         tickers = list(weights.keys())
         w = np.array([weights[t] for t in tickers], dtype=np.float64)
 
-        # Normalize so the full capital is always deployed, even when
-        # weights sum to e.g. 0.995 (within the accepted tolerance).
+        # Normalise accepted weights so all capital is deployed.
         w_sum = w.sum()
         if w_sum > _EPSILON:
             w = w / w_sum
 
         subset = prices[tickers].copy()
-        price_matrix = subset.values.astype(np.float64)  # (T, n_assets)
+        price_matrix = subset.values.astype(np.float64)  # Shape: T x n_assets.
         n_rows = price_matrix.shape[0]
 
-        # Validate first-row prices.
+        # Opening prices must be valid because initial shares depend on them.
         first_prices = price_matrix[0]
         safe_first = np.where(
             (first_prices > _EPSILON) & np.isfinite(first_prices),
@@ -849,7 +840,7 @@ class BacktestEngine:
                 "They may not have data in the selected date range."
             )
 
-        # ── Buy-and-hold (original behaviour) ────────────────────────
+        # ── Buy-and-hold ─────────────────────────────────────────────
         if rebalance_every is None:
             capital_per_asset = w * initial_capital
             shares = capital_per_asset / safe_first
@@ -860,7 +851,7 @@ class BacktestEngine:
         values = np.empty(n_rows, dtype=np.float64)
         current_value = initial_capital
 
-        # Initial share purchase
+        # Buy initial shares at target weights.
         shares = (current_value * w) / safe_first
         values[0] = current_value
 
@@ -869,7 +860,7 @@ class BacktestEngine:
             current_value = float((shares * current_prices).sum())
             values[i] = current_value
 
-            # Rebalance at every N-th row (skip if prices are invalid)
+            # Rebalance on schedule unless the current price row is invalid.
             if i % rebalance_every == 0:
                 safe_prices = np.where(
                     (current_prices > _EPSILON) & np.isfinite(current_prices),
@@ -900,7 +891,7 @@ class BacktestEngine:
         prices: Optional[pd.DataFrame] = None,
         benchmark_values: Optional[pd.Series] = None,
     ) -> BacktestMetrics:
-        """Derive financial metrics from a portfolio value series.
+        """Compute financial metrics from a portfolio value series.
 
         Parameters
         ----------
@@ -921,15 +912,15 @@ class BacktestEngine:
         end_val = float(values.iloc[-1])
         total_ret = (end_val / start_val) - 1.0
 
-        # 1. ДИНАМІЧНИЙ ФАКТОР АНУАЛІЗАЦІЇ (Рятує від змішаних дат у БД)
+        # Compute annualisation from actual dates to support irregular data.
         days_total = (values.index[-1] - values.index[0]).days
         years = max(days_total / 365.25, _EPSILON)
-        ann_factor = len(values) / years  # Самостійно вираховує, скільки торгів було в році
+        ann_factor = len(values) / years  # Observations per calendar year.
 
         cagr_val = (end_val / start_val) ** (1.0 / years) - 1.0
         returns = values.pct_change().dropna()
 
-        # 2. Використовуємо ann_factor замість жорстких 52
+        # Use the dynamic annualisation factor instead of assuming weekly data.
         ann_vol = float(returns.std() * np.sqrt(ann_factor))
 
         rf_period = (1.0 + self._rf) ** (1.0 / ann_factor) - 1.0
@@ -940,7 +931,7 @@ class BacktestEngine:
                 * np.sqrt(ann_factor)
         )
 
-        # Sortino
+        # Sortino uses downside volatility of excess returns only.
         downside = excess[excess < 0]
         if len(downside) < 2:
             sortino = float("nan")
@@ -956,7 +947,7 @@ class BacktestEngine:
 
         drawdown = float(((values / values.cummax()) - 1.0).min())
 
-        # ── Extended metrics (delegated to app.backtesting.metrics) ──
+        # ── Extended metrics delegated to app.backtesting.metrics ─────
         calmar = _metrics.calmar_ratio(cagr_val, drawdown)
         var95 = _metrics.historical_var(returns, level=0.95)
         cvar95 = _metrics.historical_cvar(returns, level=0.95)
@@ -1012,7 +1003,7 @@ class BacktestEngine:
     # ------------------------------------------------------------------
 
     def _build_benchmark(self, prices: pd.DataFrame) -> BacktestResult:
-        """Equal-weight benchmark across all available tickers.
+        """Build the deprecated global equal-weight benchmark.
 
         .. deprecated::
             This global benchmark uses *all* tickers from *all* portfolios.
@@ -1040,7 +1031,7 @@ class BacktestEngine:
         spec: PortfolioSpec,
         available: pd.Index,
     ) -> None:
-        """Raise early if the portfolio specification is invalid."""
+        """Validate one portfolio specification before simulation."""
         if not spec.weights:
             raise ValueError(f"Portfolio '{spec.name}' has no weights")
 

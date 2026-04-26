@@ -8,22 +8,22 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship,
 
 logger = logging.getLogger(__name__)
 
-# --- АБСОЛЮТНИЙ ШЛЯХ (FIX) ---
-# 1. Знаходимо, де лежить цей файл (app/data/models.py)
+# --- Absolute database path ---
+# 1. Locate this file (app/data/models.py).
 CURRENT_FILE = Path(__file__).resolve()
 
-# 2. Вираховуємо корінь проекту (Diploma/)
+# 2. Resolve the project root (Diploma/).
 # app/data/models.py -> parent -> app/data -> parent -> app -> parent -> Diploma
 PROJECT_ROOT = CURRENT_FILE.parent.parent.parent
 
-# 3. Формуємо шлях до папки з базою
+# 3. Build the database directory and file path.
 DB_DIR = PROJECT_ROOT / "resources" / "db"
 DB_FILE = DB_DIR / "portfolio.db"
 
-# Створюємо папку, якщо її немає (щоб не було помилок при першому запуску)
+# Create the directory on first run if it does not exist yet.
 os.makedirs(DB_DIR, exist_ok=True)
 
-# 4. Шлях для SQLAlchemy
+# 4. SQLAlchemy connection URL.
 DB_PATH = f"sqlite:///{DB_FILE}"
 
 logger.debug("Using Database at: %s", DB_PATH)

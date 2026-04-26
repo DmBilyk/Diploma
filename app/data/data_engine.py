@@ -8,15 +8,15 @@ from typing import List, Dict
 
 class DataEngine:
     """
-    Модуль завантаження даних.
-    Налаштування: Суворо 30 років історії, інтервал - 1 тиждень.
+    Market data download module.
+    Default setup: 30 years of history at a weekly interval.
     """
 
     def get_sp500_tickers(self) -> List[str]:
-        """Парсить тікери S&P 500 з Вікіпедії (з обходом захисту від ботів)."""
+        """Parse S&P 500 tickers from Wikipedia with a browser-like request."""
         try:
             url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-            # Додаємо User-Agent, щоб Вікіпедія не блокувала запит (Error 403)
+            # Use a browser-like User-Agent so Wikipedia does not reject the request.
             headers = {
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
@@ -27,13 +27,13 @@ class DataEngine:
             ctx.verify_mode = ssl.CERT_NONE
             response = requests.get(url, headers=headers, verify=False, timeout=15)
 
-            response.raise_for_status()  # Перевірка на помилки (404, 403 тощо)
+            response.raise_for_status()  # Raise for HTTP errors such as 403 or 404.
 
-            # Парсимо HTML-текст відповіді
+            # Parse tables from the returned HTML page.
             tables = pd.read_html(response.text)
             df = tables[0]
 
-            # Замінюємо крапки на дефіси (наприклад BRK.B -> BRK-B)
+            # Yahoo Finance uses dashes for tickers such as BRK.B -> BRK-B.
             tickers = df['Symbol'].str.replace('.', '-', regex=False).tolist()
 
             print(f"✅ Successfully parsed {len(tickers)} S&P 500 tickers.")
@@ -41,7 +41,7 @@ class DataEngine:
 
         except Exception as e:
             print(f"❌ Error fetching S&P 500: {e}")
-            # Резервний список, якщо парсинг не вдався
+            # Fallback universe if Wikipedia parsing fails.
             return ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "JPM", "V", "PG"]
 
     def download_market_data(self, tickers: List[str], start_date: datetime = None, progress_callback=None) -> Dict[
@@ -69,7 +69,7 @@ class DataEngine:
                 current_pct = 10 + int((i / total_tickers) * 80)
                 progress_callback(current_pct, f"Завантаження з Yahoo: {batch[0]}... ({i}/{total_tickers})")
 
-            # До 3 спроб на батч із затримкою між ними
+            # Retry each batch up to three times with a short backoff.
             for attempt in range(3):
                 try:
                     data = yf.download(
@@ -84,11 +84,11 @@ class DataEngine:
                     )
                     batch_results = self._process_batch_result(data, batch, min_length=0 if start_date else 100)
                     valid_data.update(batch_results)
-                    break  # успіх — виходимо з циклу спроб
+                    break  # Successful batch; stop retrying.
 
                 except Exception as e:
                     if attempt < 2:
-                        wait = 2 ** attempt  # 1s, потім 2s
+                        wait = 2 ** attempt  # 1s, then 2s.
                         print(f"   ⚠️ Batch attempt {attempt + 1}/3 failed: {e}. Retry in {wait}s...")
                         time.sleep(wait)
                     else:
@@ -101,14 +101,14 @@ class DataEngine:
     def _process_batch_result(self, data: pd.DataFrame, requested_tickers: List[str], min_length: int = 100) -> Dict[str, pd.DataFrame]:
         results = {}
 
-        # 1. Один тікер (плоский DataFrame)
+        # 1. Single ticker downloads return a flat DataFrame.
         if len(requested_tickers) == 1:
             ticker = requested_tickers[0]
             if not data.empty:
                 results[ticker] = self._clean_dataframe(data)
             return results
 
-        # 2. Багато тікерів (MultiIndex)
+        # 2. Multi-ticker downloads return a MultiIndex column structure.
         if not isinstance(data.columns, pd.MultiIndex):
             return results
 
@@ -117,7 +117,7 @@ class DataEngine:
                 if ticker in data.columns.levels[0]:
                     df_ticker = data[ticker].copy()
 
-                    # Відкидаємо зовсім порожні або надто короткі історії (якщо мануально не вказано min_length)
+                    # Drop empty or too-short histories unless min_length allows them.
                     if len(df_ticker.dropna(how='all')) > min_length:
                         cleaned = self._clean_dataframe(df_ticker)
                         if not cleaned.empty:
@@ -128,18 +128,18 @@ class DataEngine:
         return results
 
     def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Очищення та нормалізація даних"""
+        """Clean and normalise a downloaded price DataFrame."""
         if df.index.tz is not None:
             df.index = df.index.tz_localize(None)
 
         df = df.rename(columns={"Adj Close": "Adj Close"})
 
-        # Визначаємо останню реальну дату торгів ДО ffill
+        # Capture the last real trading date before forward-filling.
         price_col = 'Adj Close' if 'Adj Close' in df.columns else 'Close'
         if price_col in df.columns:
             last_valid_idx = df[price_col].last_valid_index()
 
-        # Протягуємо вперед (якщо були свята)
+        # Forward-fill short market-holiday gaps.
         df = df.ffill()
 
 
@@ -155,8 +155,8 @@ class DataEngine:
             df['Volume'] = df['Volume'].fillna(0)
 
 
-        # Видаляємо NaN (тобто всі дати ДО моменту реального IPO)
-        if 'Adj Close' in df.columns:  # Використовуємо Adj Close як критерій
+        # Remove rows before the asset has real post-IPO adjusted-close data.
+        if 'Adj Close' in df.columns:  # Use adjusted close as the validity criterion.
             df = df.dropna(subset=['Adj Close'])
 
         return df

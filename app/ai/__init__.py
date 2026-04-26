@@ -2,14 +2,14 @@
 app/ai
 ======
 
-PPO-based reinforcement-learning portfolio optimiser.
+Public API for the PPO portfolio optimiser package.
 
 Public surface
 --------------
-``PortfolioEnv``          – Gymnasium environment
-``PPOPortfolioTrainer``   – training pipeline
-``PPOInference``          – load model + extract weights
-``load_and_prepare``      – data loading & splitting
+``PortfolioEnv``          – Gymnasium-compatible environment
+``PPOPortfolioTrainer``   – PPO training workflow
+``PPOInference``          – model loading and weight extraction
+``load_and_prepare``      – market-data cleaning and splitting
 """
 
 from app.ai.environment import PortfolioEnv

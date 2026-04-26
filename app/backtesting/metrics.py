@@ -2,14 +2,13 @@
 metrics.py
 ==========
 
-Pure functions implementing the extended financial metrics used by
-:class:`BacktestEngine`.
+Pure financial metric functions used by :class:`BacktestEngine`.
 
 These are kept separate from the engine so that:
 
-* each metric has a single, easily-tested implementation;
+* each metric has one easily tested implementation;
 * the engine file stays focused on simulation orchestration;
-* the testing chapter of the thesis can target small, well-defined units.
+* thesis tests can target small, well-defined units.
 
 All functions accept plain numpy / pandas inputs and return scalars.
 None of them touch the database, the engine state, or any global config.
@@ -30,7 +29,7 @@ _EPSILON = 1e-12
 # ═══════════════════════════════════════════════════════════════════════════
 
 def calmar_ratio(cagr: float, max_drawdown: float) -> float:
-    """Calmar ratio = CAGR / |MaxDD|.
+    """Return the Calmar ratio, defined as CAGR divided by absolute drawdown.
 
     Returns ``nan`` when drawdown is effectively zero (no downside observed).
     """
@@ -45,7 +44,7 @@ def information_ratio(
     benchmark_returns: pd.Series,
     ann_factor: float,
 ) -> float:
-    """Annualised information ratio of *returns* over *benchmark_returns*.
+    """Return annualised active return per unit of active risk.
 
     IR = mean(active) / std(active) · √ann_factor, where
     active = portfolio - benchmark per period.
@@ -65,7 +64,7 @@ def tracking_error(
     benchmark_returns: pd.Series,
     ann_factor: float,
 ) -> float:
-    """Annualised tracking error: std(portfolio - benchmark) · √ann_factor."""
+    """Return annualised tracking error against a benchmark series."""
     aligned = pd.concat([returns, benchmark_returns], axis=1, join="inner").dropna()
     if len(aligned) < 2:
         return float("nan")
@@ -78,7 +77,7 @@ def tracking_error(
 # ═══════════════════════════════════════════════════════════════════════════
 
 def historical_var(returns: pd.Series, level: float = 0.95) -> float:
-    """Historical VaR at *level* (0.95 → 95 %).
+    """Return historical VaR at the requested confidence level.
 
     Returned as a **positive** number representing the loss magnitude:
     e.g. 0.04 means a one-period loss of 4 % is the cutoff at the
@@ -94,7 +93,7 @@ def historical_var(returns: pd.Series, level: float = 0.95) -> float:
 
 
 def historical_cvar(returns: pd.Series, level: float = 0.95) -> float:
-    """Historical CVaR (a.k.a. Expected Shortfall) at *level*.
+    """Return historical CVaR, also called Expected Shortfall.
 
     Mean loss in the worst (1-level) tail, expressed as a positive number.
     """
@@ -116,7 +115,7 @@ def historical_cvar(returns: pd.Series, level: float = 0.95) -> float:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def ulcer_index(values: pd.Series) -> float:
-    """Ulcer Index — RMS of percentage drawdowns from running peak.
+    """Return the Ulcer Index from the portfolio value curve.
 
     Lower is better; rewards smooth equity curves and punishes deep,
     long drawdowns more harshly than max-drawdown alone.
@@ -134,7 +133,7 @@ def downside_deviation(
     mar: float = 0.0,
     ann_factor: float = 1.0,
 ) -> float:
-    """Annualised downside deviation below the Minimum Acceptable Return.
+    """Return annualised downside deviation below the target return.
 
     Only periods with ``return < mar`` contribute.  Returns ``nan`` if
     no periods are below the threshold.
@@ -151,19 +150,19 @@ def downside_deviation(
 # ═══════════════════════════════════════════════════════════════════════════
 
 def best_period_return(returns: pd.Series) -> float:
-    """Maximum single-period return."""
+    """Return the best single-period return."""
     r = returns.dropna()
     return float(r.max()) if len(r) else float("nan")
 
 
 def worst_period_return(returns: pd.Series) -> float:
-    """Minimum single-period return."""
+    """Return the worst single-period return."""
     r = returns.dropna()
     return float(r.min()) if len(r) else float("nan")
 
 
 def win_rate(returns: pd.Series) -> float:
-    """Fraction of periods with strictly positive return (0–1)."""
+    """Return the fraction of periods with a positive return."""
     r = returns.dropna()
     if len(r) == 0:
         return float("nan")
@@ -175,7 +174,7 @@ def win_rate(returns: pd.Series) -> float:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def count_holdings(weights: Dict[str, float], threshold: float = 1e-6) -> int:
-    """Number of assets with weight strictly greater than *threshold*."""
+    """Return the number of positions above the weight threshold."""
     return int(sum(1 for w in weights.values() if w > threshold))
 
 
@@ -184,7 +183,7 @@ def turnover(
     prices: pd.DataFrame,
     rebalance_every: Optional[int],
 ) -> float:
-    """Mean per-rebalance one-way turnover (sum of |Δw| / 2 across rebalances).
+    """Return mean one-way turnover across rebalance dates.
 
     Mechanics
     ---------
@@ -216,7 +215,7 @@ def turnover(
     if not np.all(np.isfinite(first)) or np.any(first <= _EPSILON):
         return float("nan")
 
-    shares = w_target / first  # unit-capital shares
+    shares = w_target / first  # Unit-capital shares.
     events = []
     for i in range(1, n_rows):
         if i % rebalance_every != 0:
@@ -230,7 +229,7 @@ def turnover(
             continue
         w_drift = positions / total
         events.append(0.5 * float(np.abs(w_target - w_drift).sum()))
-        shares = (total * w_target) / cur  # re-balanced shares
+        shares = (total * w_target) / cur  # Shares after rebalancing.
 
     if not events:
         return float("nan")

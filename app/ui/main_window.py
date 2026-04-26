@@ -1,12 +1,12 @@
 from __future__ import annotations
 """
-app/ui/main_window.py — Головне вікно програми InvestPortfolio Optimizer.
+app/ui/main_window.py — Main application window for InvestPortfolio Optimizer.
 
-Структура:
-- Фіксований темний sidebar зі навігаційними кнопками
+Structure:
+- Fixed dark sidebar with navigation buttons
 - QStackedWidget:
-    0 — Market Data Explorer (таблиця тікерів + StockChartWidget)
-    1 — Optimization  (spinner-placeholder)
+    0 — Market Data Explorer (ticker table + StockChartWidget)
+    1 — Optimization
     2 — Backtesting   (BacktestWidget)
 """
 
@@ -51,14 +51,14 @@ _NEGATIVE  = "#F43F5E"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Головне вікно
+# Main window
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class MainWindow(QMainWindow):
     """
-    Головне вікно програми.
+    Main application window.
 
-    Layout: [Sidebar 200px] | [QStackedWidget — решта ширини]
+    Layout: [Sidebar 200px] | [QStackedWidget fills the remaining width]
     """
 
     _SIDEBAR_W   = 200
@@ -203,7 +203,6 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Logo block
         logo = QWidget()
         logo.setFixedHeight(68)
         logo.setStyleSheet(f"background-color: {_BG}; border-bottom: 1px solid {_BORDER};")
@@ -224,7 +223,6 @@ class MainWindow(QMainWindow):
 
         layout.addSpacing(8)
 
-        # Nav section label
         nav_lbl = QLabel("NAVIGATION")
         nav_lbl.setStyleSheet(f"""
             color: {_TEXT_SEC};
@@ -276,7 +274,6 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Top bar
         topbar = QWidget()
         topbar.setFixedHeight(52)
         topbar.setStyleSheet(f"""
@@ -316,11 +313,10 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(topbar)
 
-        # Content stack (data view / spinner)
+        # Switches between the market data view and sync progress.
         self.market_stack = QStackedWidget()
         self.market_stack.setStyleSheet(f"background-color: {_BG};")
 
-        # 1. Data view
         data_view = QWidget()
         data_view.setStyleSheet(f"background-color: {_BG};")
         content = QHBoxLayout(data_view)
@@ -347,7 +343,6 @@ class MainWindow(QMainWindow):
 
         self.market_stack.addWidget(data_view)
 
-        # 2. Spinner
         self.market_spinner = OptimizingSpinner()
         self.market_stack.addWidget(self.market_spinner)
 
@@ -378,7 +373,7 @@ class MainWindow(QMainWindow):
             self._table.setItem(row, 1, QTableWidgetItem("S&P 500"))
         self._table.setSortingEnabled(True)
 
-        # Auto-select the first ticker so the chart is never blank on startup
+        # Auto-select the first ticker so the chart is not blank on startup.
         if tickers:
             self._table.selectRow(0)
             quotes = self._repo.get_quotes(tickers[0])

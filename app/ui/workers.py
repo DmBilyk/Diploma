@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 1. Воркер для синхронізації ринкових даних
+# Market-data sync worker
 # ══════════════════════════════════════════════════════════════════════════════
 class DataSyncWorker(QThread):
     progress_updated = Signal(int, str)
@@ -18,7 +18,7 @@ class DataSyncWorker(QThread):
         self._core = core_instance
 
     def run(self):
-        """Цей код виконується у фоновому потоці."""
+        """Run market-data synchronisation in a background thread."""
         try:
             def callback(percent: int, msg: str):
                 self.progress_updated.emit(percent, msg)
@@ -31,7 +31,7 @@ class DataSyncWorker(QThread):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 2. Воркер для запуску оптимізації та бектесту
+# Optimisation and backtest worker
 # ══════════════════════════════════════════════════════════════════════════════
 class BacktestWorker(QThread):
     progress_updated = Signal(int, str)
@@ -58,29 +58,26 @@ class BacktestWorker(QThread):
 
 """
 ==================
-QThread-воркер для завантаження даних у фоновому потоці.
-UI залишається живим, прогрес передається через сигнали.
+QThread worker for background database loading.
+The UI remains responsive while progress is delivered through Qt signals.
 """
 class DataLoaderWorker(QThread):
     """
-    Запускає ensure_database_populated у фоновому потоці.
-    Передає прогрес у головний потік через Qt-сигнали.
+    Run ``ensure_database_populated`` outside the UI thread and forward
+    progress through Qt signals.
     """
 
-    # Сигнал: (відсоток 0-100, повідомлення)
     progress = Signal(int, str)
-    # Сигнал: завантаження завершено (True = були нові дані, False = БД вже заповнена)
     finished = Signal(bool)
-    # Сигнал: помилка під час завантаження
     error = Signal(str)
 
     def run(self):
-        """Виконується в окремому потоці."""
+        """Execute the bootstrap check in a worker thread."""
         try:
             from app.data.db_bootstrap import ensure_database_populated
 
             def on_progress(percent: int, message: str):
-                # emit() безпечний між потоками — Qt поставить у чергу
+                # Qt queues signal delivery safely across threads.
                 self.progress.emit(percent, message)
 
             result = ensure_database_populated(progress_callback=on_progress)

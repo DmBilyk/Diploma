@@ -2,12 +2,11 @@
 app/ai/inference.py
 ===================
 
-Inference utilities: run a trained PPO agent on new (unseen) data and extract
-portfolio weights compatible with ``BacktestEngine`` / ``PortfolioCore``.
+Inference utilities for turning a trained PPO policy into portfolio weights.
 
-The key public interface is :class:`PPOInference`, which accepts a path to a
-saved model and returns ``Dict[str, float]`` weights – the same format used
-everywhere else in the platform.
+The main entry point is :class:`PPOInference`. It loads a saved model, runs it
+over an out-of-sample return matrix, and returns ``Dict[str, float]`` weights
+compatible with ``BacktestEngine`` and ``PortfolioCore``.
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class PPOInference:
-    """Run a trained PPO model and extract portfolio weights.
+    """Run a trained PPO model and extract a clean allocation.
 
     Parameters
     ----------
@@ -34,7 +33,7 @@ class PPOInference:
         Path to a ``.zip`` file produced by :class:`~app.ai.trainer.PPOPortfolioTrainer`.
     env_kwargs : dict | None
         Extra kwargs forwarded to :class:`~app.ai.environment.PortfolioEnv`
-        (must match the kwargs used during training).
+        and expected to match the training environment.
     """
 
     def __init__(
@@ -51,7 +50,7 @@ class PPOInference:
     # ────────────────────────────────────────────────────────────────────
 
     def load(self) -> "PPOInference":
-        """Load the model weights into memory (lazy – call before inference)."""
+        """Load model weights into memory before inference."""
         if not self.model_path.exists():
             raise FileNotFoundError(
                 f"PPO model file not found: {self.model_path}. "
@@ -70,21 +69,22 @@ class PPOInference:
         returns_df: pd.DataFrame,
         initial_balance: float = 100_000.0,
     ) -> Tuple[List[float], List[np.ndarray]]:
-        """Run the agent through a full episode.
+        """Run the policy across one complete inference episode.
 
         Parameters
         ----------
         returns_df : pd.DataFrame
-            Returns for the inference period (test / out-of-sample data).
+            Returns for the inference period, usually out-of-sample data.
         initial_balance : float
 
         Returns
         -------
         portfolio_values : list[float]
-            Value at each step (length = len(returns_df) + 1, first entry is
+            Portfolio value at each step. Length is len(returns_df) + 1, and
+            the first entry is
             ``initial_balance``).
         weight_history : list[np.ndarray]
-            Target weights chosen at each step (length = len(returns_df)).
+            Target weights chosen at each step.
         """
         if self._model is None:
             self.load()
@@ -108,43 +108,43 @@ class PPOInference:
         top_n: Optional[int] = None,
         min_weight: float = 0.01,
     ) -> Dict[str, float]:
-        """Return the agent's **terminal** weight allocation.
+        """Return the agent's terminal allocation.
 
-        This is the weight vector at the end of the episode – suitable for
-        constructing a ``PortfolioSpec`` to pass to ``BacktestEngine``.
+        The result is suitable for constructing a ``PortfolioSpec`` for
+        ``BacktestEngine``.
 
         Parameters
         ----------
         returns_df : pd.DataFrame
-            Training or most-recent price history (used to derive weights).
+            Return history used to derive the allocation.
         top_n : int | None
-            Keep only the ``top_n`` highest-weight assets; redistribute the
-            remainder equally.  ``None`` → keep all.
+            Keep only the ``top_n`` highest-weight assets.  ``None`` keeps all
+            assets that pass ``min_weight``.
         min_weight : float
-            Assets with weight below this threshold are pruned (weight
-            redistributed proportionally).
+            Assets below this threshold are removed before normalisation.
 
         Returns
         -------
-        Dict[str, float]  – {ticker: weight}, sums to 1.0
+        Dict[str, float]
+            ``{ticker: weight}``, normalised to sum to 1.0.
         """
         _, weight_history = self.run_episode(returns_df)
-        # Average the last 20 steps to smooth out the terminal allocation
+        # Smooth the terminal allocation with the most recent policy choices.
         tail = min(20, len(weight_history))
         mean_weights = np.mean(weight_history[-tail:], axis=0)
 
         tickers = list(returns_df.columns)
         weights = dict(zip(tickers, mean_weights.tolist()))
 
-        # Prune small positions
+        # Remove tiny positions that would not be useful in a static portfolio.
         weights = {t: w for t, w in weights.items() if w >= min_weight}
 
-        # Optionally keep only top N
+        # Enforce an optional cardinality limit.
         if top_n is not None and len(weights) > top_n:
             sorted_w = sorted(weights.items(), key=lambda kv: kv[1], reverse=True)
             weights = dict(sorted_w[:top_n])
 
-        # Re-normalise to sum = 1.0
+        # Normalise after pruning so the allocation remains fully invested.
         total = sum(weights.values())
         if total < 1e-8:
             raise RuntimeError("All weights are zero after pruning – check your data.")
@@ -161,10 +161,10 @@ class PPOInference:
         returns_df: pd.DataFrame,
         min_weight: float = 0.01,
     ) -> Dict[str, float]:
-        """Return weights averaged over the **whole** episode.
+        """Return weights averaged across the whole episode.
 
-        Useful when the agent's allocation changes slowly and you want a
-        stable, representative vector.
+        This is useful when the policy changes slowly and a representative
+        allocation is preferable to the final step alone.
         """
         _, weight_history = self.run_episode(returns_df)
         mean_weights = np.mean(weight_history, axis=0)

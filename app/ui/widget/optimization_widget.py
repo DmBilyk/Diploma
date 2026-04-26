@@ -2,7 +2,7 @@
 app/ui/widget/optimization_widget.py
 ======================================
 
-Сторінка «Portfolio Optimization» у темному стилі (Fintech Terminal).
+Dark themed Portfolio Optimization page.
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ _SERIES_COLORS = [
 ]
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  MATPLOTLIB КАНВАС
+#  MATPLOTLIB CANVAS
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _ThemeAwareCanvas(FigureCanvas):
@@ -79,7 +79,7 @@ class _ThemeAwareCanvas(FigureCanvas):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ПАНЕЛЬ КОНТРОЛЮ
+#  CONTROL PANEL
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _ControlPanel(QScrollArea):
@@ -280,7 +280,7 @@ class _ControlPanel(QScrollArea):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  КАРТКИ МЕТРИК
+#  METRIC CARDS
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _MetricCard(QFrame):
@@ -333,7 +333,7 @@ class _MetricsBadges(QWidget):
 
         self._sharpe.set_value(f"{result.sharpe_ratio:.2f}", sharpe_color)
 
-        # Show generation count for Hybrid Evo; "Plugin" for external algorithms
+        # External plugin results use 0 generations.
         if result.n_generations > 0:
             self._n_gen.set_value(str(result.n_generations), _TEXT_PRI)
         else:
@@ -345,7 +345,7 @@ class _MetricsBadges(QWidget):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  DONUT-ГРАФІК ВАГИ
+#  WEIGHTS DONUT CHART
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _WeightsDonut(QWidget):
@@ -357,7 +357,7 @@ class _WeightsDonut(QWidget):
         lyt.setContentsMargins(0, 0, 0, 0)
         lyt.addWidget(self._canvas)
 
-        # hover state
+        # Hover state shared between render and motion events.
         self._ax:        object | None = None
         self._wedges:    list          = []
         self._labels_d:  list          = []
@@ -366,7 +366,7 @@ class _WeightsDonut(QWidget):
 
         self._canvas.mpl_connect("motion_notify_event", self._on_hover)
 
-    # ── hover handler ────────────────────────────────────────────────────
+    # ── Hover handler ─────────────────────────────────────────────────────
     def _on_hover(self, event) -> None:
         if not self._ax or not self._wedges or event.inaxes != self._ax:
             if self._annot and self._annot.get_visible():
@@ -391,7 +391,7 @@ class _WeightsDonut(QWidget):
 
         self._canvas.draw_idle()
 
-    # ── render ───────────────────────────────────────────────────────────
+    # ── Render ────────────────────────────────────────────────────────────
     def render(self, weights: dict[str, float]) -> None:
         self._fig.clear()
         ax = self._fig.add_subplot(111)
@@ -424,7 +424,7 @@ class _WeightsDonut(QWidget):
             at.set_color(_TEXT_PRI)
             at.set_fontweight("bold")
 
-        # raise wedges to top so contains() works reliably
+        # Keep wedges above the background so hover hit testing is reliable.
         for w in wedges:
             w.set_zorder(3)
 
@@ -443,7 +443,7 @@ class _WeightsDonut(QWidget):
             color=_TEXT_PRI, fontsize=12, fontweight="bold", pad=14, loc="left",
         )
 
-        # persistent hover annotation (hidden until mouse enters a wedge)
+        # Persistent annotation, shown only while hovering a wedge.
         self._annot = ax.annotate(
             "",
             xy=(0, 0),
@@ -463,7 +463,7 @@ class _WeightsDonut(QWidget):
             zorder=10,
         )
 
-        # cache for hover handler
+        # Cache chart objects for the hover handler.
         self._wedges   = wedges
         self._labels_d = labels
         self._values_d = values
@@ -473,7 +473,7 @@ class _WeightsDonut(QWidget):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ТАБЛИЦЯ АКТИВІВ
+#  ASSETS TABLE
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _AssetsTable(QTableWidget):
@@ -539,7 +539,7 @@ class _AssetsTable(QTableWidget):
             weight_item = QTableWidgetItem(f"{weight:.2%}")
             weight_item.setTextAlignment(Qt.AlignCenter)
 
-            # Expected annual return per asset (if available from mu calculation)
+            # Expected annual return, when available from the optimiser inputs.
             mu_val = (mu_per_asset or {}).get(ticker, None)
             if mu_val is not None:
                 mu_color = _SUCCESS if mu_val >= 0 else _DANGER
@@ -556,7 +556,7 @@ class _AssetsTable(QTableWidget):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ДАШБОРД РЕЗУЛЬТАТІВ
+#  RESULTS DASHBOARD
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _ResultDashboard(QWidget):
@@ -632,7 +632,7 @@ class _EmptyState(QWidget):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ФОНОВИЙ WORKER
+#  BACKGROUND WORKER
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _OptimizationWorker(QThread):
@@ -644,7 +644,7 @@ class _OptimizationWorker(QThread):
         super().__init__(parent)
         self._core         = core
         self._params       = params
-        self.mu_per_asset: dict[str, float] = {}   # filled during run()
+        self.mu_per_asset: dict[str, float] = {}   # Filled during run().
 
     def run(self) -> None:
         try:
@@ -655,7 +655,7 @@ class _OptimizationWorker(QThread):
                 self.progress_updated.emit(20, "Initializing population...")
                 result: OptimizationResult = self._core.run_optimization(**self._params)
 
-                # Calculate per-asset μ for the table column
+                # Compute per-asset expected returns for the table.
                 self.progress_updated.emit(92, "Computing per-asset returns...")
                 try:
                     prices = self._core.get_price_history(
@@ -686,7 +686,7 @@ class _OptimizationWorker(QThread):
                     config=self._params,
                 )
 
-                # ── Calculate ex-ante metrics via PyPortfolioOpt ──────────
+                # ── Compute ex-ante metrics with PyPortfolioOpt ───────────
                 self.progress_updated.emit(70, "Calculating ex-ante metrics...")
                 sharpe_ratio    = 0.0
                 expected_return = 0.0
@@ -713,13 +713,12 @@ class _OptimizationWorker(QThread):
                             sharpe_ratio = (
                                 (expected_return - risk_free_rate) / portfolio_risk
                             )
-                        # Save per-asset μ for the table
+                        # Store per-asset expected returns for the table.
                         self.mu_per_asset = {
                             t: float(mu[t]) for t in tickers_ord
                         }
                 except Exception as _e:
                     logger.warning("Plugin metric calculation failed: %s", _e)
-                # ─────────────────────────────────────────────────────────
 
                 result = OptimizationResult(
                     weights=weights,
@@ -765,7 +764,7 @@ class _SpinnerView(QWidget):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ГОЛОВНИЙ WIDGET
+#  MAIN WIDGET
 # ══════════════════════════════════════════════════════════════════════════════
 
 class OptimizationWidget(QWidget):

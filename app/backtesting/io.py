@@ -2,23 +2,23 @@
 io.py
 =====
 
-Serialisation, persistence and reporting for :class:`BacktestReport`.
+Persistence and report export helpers for :class:`BacktestReport`.
 
 Exposes
 -------
-* ``report_to_dict`` / ``report_from_dict`` — round-trippable JSON-friendly form.
+* ``report_to_dict`` / ``report_from_dict`` — round-trippable JSON-friendly data.
 * ``save_json`` / ``load_json`` — disk persistence.
-* ``save_csv`` — one CSV per portfolio (equity curve) + ``summary.csv`` with
+* ``save_csv`` — one equity-curve CSV per portfolio plus ``summary.csv`` with
   a metrics matrix.
 * ``save_html`` — self-contained HTML report (charts embedded as base64 PNG).
 
 Design notes
 ------------
-* No external template engine, no Jinja, no new dependencies.
-* JSON uses ``None`` in place of ``NaN`` / ``Inf`` (JSON has no representation
-  for them); the loader converts back to ``float('nan')`` so downstream
-  arithmetic is unaffected.
-* All exports are pure functions — they receive a report and write to disk.
+* No template engine or extra dependency is required.
+* JSON uses ``None`` in place of ``NaN`` / ``Inf`` because JSON has no native
+  representation for those values. The loader restores them to ``float('nan')``.
+* Export functions receive a report and write files; they do not mutate engine
+  state.
   This keeps :class:`BacktestReport` itself a thin dataclass.
 """
 
@@ -45,11 +45,11 @@ SCHEMA_VERSION = 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Helpers — NaN / Inf safety for JSON
+#  Helpers for JSON-safe numeric values
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _clean(x: Any) -> Any:
-    """Recursively replace NaN / Inf with None for JSON serialisation."""
+    """Recursively replace NaN and Inf with None for JSON output."""
     if isinstance(x, float):
         if math.isnan(x) or math.isinf(x):
             return None
@@ -66,7 +66,7 @@ def _restore_float(v: Any) -> float:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Dataclass ↔ dict
+#  Dataclass / dict conversion
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _spec_to_dict(spec: PortfolioSpec) -> Dict[str, Any]:
@@ -112,8 +112,8 @@ def _result_to_dict(r: BacktestResult) -> Dict[str, Any]:
         "spec": _spec_to_dict(r.spec),
         "metrics": _metrics_to_dict(r.metrics),
         "portfolio_values": _series_to_dict(r.portfolio_values),
-        # Phase 5: full benchmark list.  ``benchmark`` (singular) is kept
-        # so reports written by older builds remain loadable.
+        # Store the full benchmark list while keeping the legacy singular
+        # benchmark field readable by older payloads.
         "benchmark": _result_to_dict(r.benchmark) if r.benchmark is not None else None,
         "benchmarks": [_result_to_dict(b) for b in r.benchmarks] if r.benchmarks else [],
     }
@@ -125,7 +125,7 @@ def _result_from_dict(d: Dict[str, Any]) -> BacktestResult:
         benchmarks = [_result_from_dict(b) for b in benchmarks_raw]
         primary = benchmarks[0]
     elif d.get("benchmark"):
-        # Legacy payload — only singular ``benchmark`` was stored.
+        # Older payloads stored only the singular benchmark field.
         primary = _result_from_dict(d["benchmark"])
         benchmarks = [primary]
     else:
@@ -141,7 +141,7 @@ def _result_from_dict(d: Dict[str, Any]) -> BacktestResult:
 
 
 def report_to_dict(report: BacktestReport) -> Dict[str, Any]:
-    """Convert a :class:`BacktestReport` to a JSON-friendly dictionary."""
+    """Convert a :class:`BacktestReport` into JSON-friendly data."""
     return _clean({
         "schema_version": SCHEMA_VERSION,
         "start_date": report.start_date,
@@ -153,7 +153,7 @@ def report_to_dict(report: BacktestReport) -> Dict[str, Any]:
 
 
 def report_from_dict(d: Dict[str, Any]) -> BacktestReport:
-    """Inverse of :func:`report_to_dict` — reconstructs a full report."""
+    """Reconstruct a full report from :func:`report_to_dict` output."""
     sv = d.get("schema_version")
     if sv != SCHEMA_VERSION:
         raise ValueError(
@@ -173,14 +173,14 @@ def report_from_dict(d: Dict[str, Any]) -> BacktestReport:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def save_json(report: BacktestReport, path: str) -> None:
-    """Serialise *report* to *path* (UTF-8, indented JSON)."""
+    """Write ``report`` to ``path`` as indented UTF-8 JSON."""
     payload = report_to_dict(report)
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=2)
 
 
 def load_json(path: str) -> BacktestReport:
-    """Deserialise a report previously saved with :func:`save_json`."""
+    """Load a report previously written by :func:`save_json`."""
     with open(path, "r", encoding="utf-8") as fh:
         return report_from_dict(json.load(fh))
 
@@ -206,14 +206,14 @@ def _safe_filename(s: str) -> str:
 
 
 def save_csv(report: BacktestReport, directory: str) -> Dict[str, str]:
-    """Write per-portfolio equity CSVs and a metrics summary CSV.
+    """Write portfolio equity CSVs and a metrics summary CSV.
 
     Returns a mapping ``{filename: full_path}`` of every file written.
     """
     os.makedirs(directory, exist_ok=True)
     written: Dict[str, str] = {}
 
-    # Per-portfolio equity curves (portfolio + its benchmark side-by-side)
+    # Write each strategy curve with its primary benchmark beside it.
     for r in report.results:
         cols = {r.spec.name: r.portfolio_values}
         if r.benchmark is not None:
@@ -224,7 +224,7 @@ def save_csv(report: BacktestReport, directory: str) -> Dict[str, str]:
         df.to_csv(full, index_label="date")
         written[fname] = full
 
-    # Summary metrics matrix (rows = portfolios + benchmarks, cols = metrics)
+    # Write one summary table for strategies and primary benchmarks.
     rows: List[Dict[str, Any]] = []
     for r in report.results:
         row = {"portfolio": r.spec.name, "kind": "strategy"}
@@ -244,7 +244,7 @@ def save_csv(report: BacktestReport, directory: str) -> Dict[str, str]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  HTML report (charts embedded as base64 PNG)
+#  HTML report with embedded PNG charts
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _png_b64(fig) -> str:
@@ -262,7 +262,7 @@ def _equity_chart_b64(report: BacktestReport):
     fig, ax = plt.subplots(figsize=(9, 4.5))
     for r in report.results:
         ax.plot(r.portfolio_values.index, r.portfolio_values.values, label=r.spec.name, linewidth=1.5)
-    # Show one EW benchmark (from the first portfolio) to keep the chart readable.
+    # Plot one benchmark only so the equity chart stays readable.
     if report.results and report.results[0].benchmark is not None:
         b = report.results[0].benchmark
         ax.plot(b.portfolio_values.index, b.portfolio_values.values,
@@ -396,7 +396,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
 
 def save_html(report: BacktestReport, path: str) -> None:
-    """Write a self-contained HTML report (single file, no external assets)."""
+    """Write a self-contained HTML report with embedded charts."""
     html = _HTML_TEMPLATE.format(
         start=report.start_date,
         end=report.end_date,

@@ -27,7 +27,7 @@ def ensure_database_populated(progress_callback=None) -> bool:
         core = PortfolioCore(repo=repo)
         core.sync_market_data(progress_callback=progress_callback)
 
-        # Перевіряємо що реально щось збережено
+        # Verify that the initial download actually saved assets.
         saved_count = len(repo.get_all_tickers())
         if saved_count == 0:
             raise RuntimeError(

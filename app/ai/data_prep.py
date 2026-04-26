@@ -2,18 +2,18 @@
 app/ai/data_prep.py
 ===================
 
-Data preparation utilities for PPO training.
+Prepare market data for PPO training.
 
-Handles the full pipeline from raw prices → clean, normalised return matrices
-ready to be consumed by :class:`~app.ai.environment.PortfolioEnv`.
+This module converts raw price history into clean return matrices that can be
+passed directly to :class:`~app.ai.environment.PortfolioEnv`.
 
 Key responsibilities
 --------------------
 * Load price history from ``PortfolioRepository``
-* Forward-fill gaps, drop low-coverage tickers
-* Compute returns and clip outliers
-* Split into train / validation / test windows without leakage
-* Optionally select a liquid, high-coverage subset of assets
+* Fill short data gaps and remove tickers with weak coverage
+* Compute clipped percentage returns
+* Split data chronologically to avoid leakage
+* Keep the asset universe small enough for stable PPO observations
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class DataSplit:
-    """Container for train / val / test return matrices."""
+    """Grouped train, validation, and test return matrices."""
 
     train: pd.DataFrame
     val: pd.DataFrame
@@ -57,25 +57,25 @@ def load_and_prepare(
     val_frac: float = 0.15,
     outlier_clip: float = 0.10,
 ) -> DataSplit:
-    """Load prices, clean, and split into train/val/test.
+    """Load prices, clean them, and create train/validation/test splits.
 
     Parameters
     ----------
     repo : PortfolioRepository
     tickers : list[str] | None
-        Explicit ticker list.  ``None`` → use all tickers in the database.
+        Explicit ticker list.  ``None`` means all database tickers are used.
     start_date, end_date : str
         Date range for price data.
     max_assets : int
-        Maximum number of assets to keep (selected by highest coverage).
-        Keeps the problem tractable and the observation space bounded.
+        Maximum number of assets to keep, selected by highest data coverage.
+        This keeps the PPO observation space bounded.
     min_coverage : float
         Drop tickers with fewer than ``min_coverage`` fraction of non-NaN rows.
     train_frac, val_frac : float
-        Proportional split sizes.  test = 1 - train - val.
+        Proportional split sizes.  The test share is the remaining data.
     outlier_clip : float
-        Clip individual daily returns to ±``outlier_clip`` to suppress data
-        errors and extreme events that confuse early training.
+        Clip individual returns to +/-``outlier_clip`` so bad ticks and rare
+        shocks do not dominate early training.
 
     Returns
     -------
@@ -109,10 +109,10 @@ def load_and_prepare(
 
     logger.info("Raw price matrix: %s", prices.shape)
 
-    # ── 1. Forward-fill gaps (max 5 consecutive missing days) ───────────
+    # ── 1. Fill short gaps without masking long missing periods ─────────
     prices = prices.ffill(limit=5)
 
-    # ── 2. Drop low-coverage tickers ────────────────────────────────────
+    # ── 2. Remove assets that would leave too many missing observations ─
     coverage = prices.notna().mean()
     ok_tickers = coverage[coverage >= min_coverage].index.tolist()
     dropped = len(tickers) - len(ok_tickers)
@@ -120,7 +120,7 @@ def load_and_prepare(
         logger.info("Dropped %d tickers with coverage < %.0f%%", dropped, min_coverage * 100)
     prices = prices[ok_tickers]
 
-    # ── 3. Select top-N by coverage (most complete data) ────────────────
+    # ── 3. Keep the most complete assets when the universe is too large ─
     if len(ok_tickers) > max_assets:
         top = coverage[ok_tickers].nlargest(max_assets).index.tolist()
         logger.info(
@@ -128,7 +128,7 @@ def load_and_prepare(
         )
         prices = prices[top]
 
-    # Drop rows where *any* remaining asset is still NaN
+    # Keep only rows where every selected asset has a valid price.
     prices = prices.dropna()
     logger.info("Clean price matrix: %s", prices.shape)
 
@@ -138,11 +138,11 @@ def load_and_prepare(
             "check your date range or data quality."
         )
 
-    # ── 4. Compute returns & clip outliers ──────────────────────────────
+    # ── 4. Compute returns and limit extreme single-period moves ────────
     returns: pd.DataFrame = prices.pct_change().dropna()
     returns = returns.clip(-outlier_clip, outlier_clip)
 
-    # ── 5. Chronological split (no shuffle – prevent look-ahead bias) ───
+    # ── 5. Split chronologically so future returns never leak backward ──
     n = len(returns)
     n_train = int(n * train_frac)
     n_val = int(n * val_frac)

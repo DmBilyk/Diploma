@@ -2,17 +2,16 @@
 app/ai/trainer.py
 =================
 
-PPO trainer for the portfolio environment.
+PPO training pipeline for the portfolio environment.
 
 Features
 --------
-* **Curriculum training** – trains first on a random sub-window, then on the
-  full dataset, preventing the agent from overfitting to specific date ranges.
-* **Custom callbacks** – logs portfolio metrics (Sharpe, max-drawdown) to
-  TensorBoard alongside the default PPO losses.
-* **Model persistence** – saves/loads checkpoints so training can be resumed.
-* **Hyperparameter-clean API** – all knobs are explicit keyword arguments with
-  sensible defaults; nothing is hidden inside the function body.
+* **Curriculum training** – warm up on a random sub-window before using the
+  full dataset, reducing early overfitting to one market regime.
+* **Custom callbacks** – record realised portfolio metrics next to PPO losses.
+* **Model persistence** – save checkpoints and the final model for reuse.
+* **Explicit configuration** – expose training knobs as keyword arguments with
+  stable defaults.
 """
 
 from __future__ import annotations
@@ -42,20 +41,20 @@ logger = logging.getLogger(__name__)
 
 
 class PortfolioMetricsCallback(BaseCallback):
-    """Logs realised portfolio metrics to TensorBoard at episode end."""
+    """Log realised portfolio metrics to TensorBoard after each episode."""
 
     def __init__(self, verbose: int = 0) -> None:
         super().__init__(verbose)
         self._episode_values: List[float] = []
 
     def _on_step(self) -> bool:
-        # DummyVecEnv stores infos in self.locals["infos"]
+        # DummyVecEnv exposes per-step environment details through infos.
         infos = self.locals.get("infos", [])
         for info in infos:
             if "portfolio_value" in info:
                 self._episode_values.append(info["portfolio_value"])
 
-        # Log at episode end
+        # Record episode-level metrics once the rollout has finished.
         dones = self.locals.get("dones", [])
         if any(dones) and len(self._episode_values) > 1:
             values = np.array(self._episode_values)
@@ -92,7 +91,7 @@ DEFAULT_PPO_KWARGS: Dict[str, Any] = {
     "clip_range": 0.2,
     "clip_range_vf": None,
     "normalize_advantage": True,
-    "ent_coef": 0.01,           # encourages exploration
+    "ent_coef": 0.01,           # Keeps exploration active during training.
     "vf_coef": 0.5,
     "max_grad_norm": 0.5,
     "policy_kwargs": {
@@ -107,12 +106,12 @@ DEFAULT_PPO_KWARGS: Dict[str, Any] = {
 
 
 class PPOPortfolioTrainer:
-    """Trains a PPO agent on portfolio data.
+    """Train a PPO agent on a return matrix.
 
     Parameters
     ----------
     returns_df : pd.DataFrame
-        Full returns matrix (train split only – do NOT include test data).
+        Training return matrix only; test data must stay out-of-sample.
     model_dir : str | Path
         Directory where checkpoints and the final model are saved.
     env_kwargs : dict | None
@@ -120,8 +119,8 @@ class PPOPortfolioTrainer:
     ppo_kwargs : dict | None
         Overrides for PPO hyperparameters (merged into ``DEFAULT_PPO_KWARGS``).
     n_envs : int
-        Number of parallel environments (currently limited to 1 – VecEnv
-        wrapper kept for future parallelism).
+        Number of vectorised environments. The wrapper is kept even when this
+        is one, because Stable-Baselines expects VecEnv-compatible input.
     tensorboard_log : str | None
         TensorBoard log directory.  ``None`` → no logging.
     seed : int | None
@@ -150,9 +149,7 @@ class PPOPortfolioTrainer:
 
         self._model: Optional[PPO] = None
         self._vec_env: Optional[DummyVecEnv] = None
-        # Single RNG instance so each _random_subwindow() call produces a
-        # different window — recreating it with the same seed every call
-        # would always yield the identical slice.
+        # Reuse one RNG so curriculum windows vary while staying reproducible.
         self._rng = np.random.default_rng(seed)
 
     # ────────────────────────────────────────────────────────────────────
@@ -168,23 +165,21 @@ class PPOPortfolioTrainer:
         curriculum_warmup_steps: int = 100_000,
         resume_from: Optional[str | Path] = None,
     ) -> PPO:
-        """Run full training pipeline.
+        """Run the complete training pipeline.
 
         Parameters
         ----------
         total_timesteps : int
-            Total environment steps across all curriculum phases.
+            Total environment steps across all phases.
         checkpoint_every : int
             Save a checkpoint every N steps.
         eval_episodes : int
             Number of episodes used by the eval callback.
         curriculum : bool
-            When True, the first ``curriculum_warmup_steps`` are trained on a
-            shorter (random) sub-window of ``returns_df`` before switching to
-            the full dataset.  This prevents early overfitting to specific
-            market regimes.
+            When True, warm up on a shorter random slice before switching to
+            the full dataset.
         curriculum_warmup_steps : int
-            Steps in the warm-up (short-window) phase.
+            Number of steps assigned to the warm-up phase.
         resume_from : str | Path | None
             Path to an existing ``.zip`` model to resume training from.
         """
@@ -211,7 +206,7 @@ class PPOPortfolioTrainer:
                 timesteps=remaining,
                 checkpoint_every=checkpoint_every,
                 phase_tag="full",
-                resume_from=None,  # already loaded from phase 1
+                resume_from=None,  # The phase 1 model is already in memory.
             )
         else:
             self._run_phase(
@@ -222,7 +217,7 @@ class PPOPortfolioTrainer:
                 resume_from=resume_from,
             )
 
-        # Save final model
+        # Persist the final policy after all phases complete.
         final_path = self.model_dir / "final_model"
         self._model.save(str(final_path))
         logger.info("Final model saved → %s.zip", final_path)
@@ -230,7 +225,7 @@ class PPOPortfolioTrainer:
         return self._model
 
     def load(self, path: str | Path) -> PPO:
-        """Load a saved model (for inference or continued training)."""
+        """Load a saved model for inference or continued training."""
         env = self._make_vec_env(self.returns_df)
         self._model = PPO.load(str(path), env=env)
         logger.info("Model loaded from %s", path)
@@ -277,13 +272,13 @@ class PPOPortfolioTrainer:
                     **self.ppo_kwargs,
                 )
         else:
-            # Re-use existing model but swap environment
+            # Continue the same policy on the next training environment.
             self._model.set_env(vec_env)
 
         self._model.learn(
             total_timesteps=timesteps,
             callback=callbacks,
-            reset_num_timesteps=False,  # keep global step counter
+            reset_num_timesteps=False,  # Preserve the global step counter.
             progress_bar=True,
         )
 
@@ -296,7 +291,7 @@ class PPOPortfolioTrainer:
         return DummyVecEnv([_make] * self.n_envs)
 
     def _random_subwindow(self, min_frac: float, max_frac: float) -> pd.DataFrame:
-        """Return a random contiguous slice of ``returns_df``."""
+        """Return a random contiguous slice for curriculum warm-up."""
         n = len(self.returns_df)
         length = int(n * self._rng.uniform(min_frac, max_frac))
         start = int(self._rng.integers(0, n - length))

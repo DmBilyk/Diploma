@@ -2,17 +2,14 @@
 benchmarks.py
 =============
 
-Built-in benchmark library for :class:`BacktestEngine` (Phase 5).
+Built-in benchmark strategies for :class:`BacktestEngine`.
 
-A *benchmark* is a deterministic weight-producing strategy used as a
-control in algorithm comparisons.  Every benchmark implements the
-:class:`Benchmark` interface — given a price slice, return a weight
-dictionary — and is plugged into the engine via the constructor's
-``benchmarks=...`` argument.
+A benchmark is a deterministic strategy used as a comparison baseline.
+Every benchmark implements :class:`Benchmark`: given a price slice, it returns
+a weight dictionary and can be passed to the engine with ``benchmarks=...``.
 
-Default behaviour preserves the historical contract: if no benchmarks
-are specified, the engine uses a single :class:`EqualWeightBenchmark`,
-which produces the per-portfolio EW reference that has shipped since v0.1.
+If no benchmarks are configured, the engine keeps the historical default:
+one equal-weight benchmark for each tested portfolio.
 
 Available benchmarks
 --------------------
@@ -22,8 +19,8 @@ Available benchmarks
   iterative scheme à la Maillard / Roncalli.
 * :class:`InverseVolatilityBenchmark` — w_i ∝ 1/σ_i (a.k.a. naive RP).
 
-All implementations are pure functions of the supplied price slice; they
-do not touch the database, RNG, or any global state.
+Implementations use only the supplied price slice. They do not touch the
+database, RNG, or global state.
 """
 
 from __future__ import annotations
@@ -43,7 +40,7 @@ _EPSILON = 1e-12
 
 
 class Benchmark(ABC):
-    """Abstract benchmark — produces weights from a price slice.
+    """Base interface for benchmarks that produce portfolio weights.
 
     Implementations must be deterministic for a given input.  The
     backtest engine uses this contract to construct per-portfolio
@@ -54,11 +51,11 @@ class Benchmark(ABC):
     @property
     @abstractmethod
     def short_name(self) -> str:
-        """Short label, e.g. ``"EW Benchmark"``."""
+        """Return a short display label, e.g. ``"EW Benchmark"``."""
 
     @abstractmethod
     def compute_weights(self, prices: pd.DataFrame) -> Dict[str, float]:
-        """Return a ``{ticker: weight}`` mapping summing to 1.0.
+        """Return a fully invested ``{ticker: weight}`` mapping.
 
         ``prices`` is the asset-universe slice the engine wishes to
         evaluate (typically the strategy's own tickers).
@@ -73,12 +70,12 @@ def _validate_prices(prices: pd.DataFrame) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Equal weight (1/N) — preserves legacy default
+#  Equal weight (1/N)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class EqualWeightBenchmark(Benchmark):
-    """Naïve 1/N allocation across the supplied tickers."""
+    """Allocate equally across the supplied tickers."""
 
     short_name = "EW Benchmark"
 
@@ -90,12 +87,12 @@ class EqualWeightBenchmark(Benchmark):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Inverse volatility — w ∝ 1/σ (naive risk parity)
+#  Inverse volatility
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class InverseVolatilityBenchmark(Benchmark):
-    """Allocate inversely proportional to each asset's std-dev of returns.
+    """Allocate weights in inverse proportion to return volatility.
 
     Cheap to compute, robust, and a strong baseline.  Falls back to
     equal-weight on degenerate inputs (zero / NaN volatilities).
@@ -123,12 +120,12 @@ class InverseVolatilityBenchmark(Benchmark):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Minimum variance — long-only, SLSQP
+#  Minimum variance
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class MinimumVarianceBenchmark(Benchmark):
-    """Long-only minimum-variance portfolio: min wᵀΣw subject to w≥0, Σw=1.
+    """Build a long-only minimum-variance benchmark with SLSQP.
 
     Solved with scipy SLSQP starting from equal weights.  Falls back to
     equal-weight if the solver fails or the covariance is singular.
@@ -141,14 +138,14 @@ class MinimumVarianceBenchmark(Benchmark):
         n = prices.shape[1]
         rets = prices.pct_change().dropna()
         if len(rets) < n + 1:
-            # Sample size too small for a stable covariance estimate
+            # Use equal weight when the covariance estimate would be unstable.
             return {t: 1.0 / n for t in prices.columns}
 
         cov = rets.cov().values.astype(np.float64)
         if not np.all(np.isfinite(cov)):
             return {t: 1.0 / n for t in prices.columns}
 
-        # Numerical regularisation
+        # Add a small ridge term for numerical stability.
         cov = cov + np.eye(n) * 1e-10
 
         try:
@@ -181,12 +178,12 @@ class MinimumVarianceBenchmark(Benchmark):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Risk parity (ERC) — iterative
+#  Risk parity (ERC)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class RiskParityBenchmark(Benchmark):
-    """Equal-Risk-Contribution portfolio (Maillard, Roncalli, Teiletche 2010).
+    """Build an Equal-Risk-Contribution portfolio.
 
     Iteratively rescales weights until each asset contributes the same
     fraction of total portfolio variance.  Falls back to inverse-volatility
@@ -210,7 +207,7 @@ class RiskParityBenchmark(Benchmark):
         if not np.all(np.isfinite(cov)):
             return InverseVolatilityBenchmark().compute_weights(prices)
 
-        # Initialise from inverse-vol as a warm start
+        # Start from inverse-volatility weights for faster convergence.
         sigma = np.sqrt(np.diag(cov))
         if np.any(sigma < _EPSILON):
             return InverseVolatilityBenchmark().compute_weights(prices)
@@ -223,12 +220,12 @@ class RiskParityBenchmark(Benchmark):
             if port_var < _EPSILON:
                 break
             marginal = cov @ w
-            rc = (w * marginal) / port_var       # risk contribution per asset
+            rc = (w * marginal) / port_var       # Per-asset risk contribution.
             err = float(np.max(np.abs(rc - target_rc)))
             if err < self._tol:
                 break
-            # Scale by ratio of target / current contribution; clamp to avoid
-            # zeros (which would freeze that asset out forever)
+            # Move each asset toward the target contribution while preventing
+            # zero weights from freezing the iteration.
             ratios = target_rc / np.maximum(rc, _EPSILON)
             w = w * np.sqrt(ratios)
             w = np.clip(w, 0.0, None)

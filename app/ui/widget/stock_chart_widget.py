@@ -140,7 +140,6 @@ class _ChartRenderer:
         self._fig.patch.set_facecolor(t.fig_bg)
         ax.set_facecolor(t.ax_bg)
 
-        # Determine trend colour
         first_price = data["adj_close"].iloc[0]
         last_price  = data["adj_close"].iloc[-1]
         line_color  = _POSITIVE if last_price >= first_price else "#F43F5E"

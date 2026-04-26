@@ -2,12 +2,11 @@
 statistics.py
 =============
 
-Statistical comparison utilities for backtest results (Phase 6).
+Statistical comparison utilities for backtest results.
 
-These let the user move from anecdotal claims ("algorithm A has Sharpe 1.2,
-B has 1.05, A is better") to defensible ones ("A's Sharpe is 0.15 higher;
-the JKM test rejects equality at p = 0.03; the 95 % bootstrap CI on the
-difference is [0.04, 0.27]").
+These helpers turn raw performance differences into statistical comparisons:
+Sharpe-difference tests, paired return tests, and bootstrap confidence
+intervals.
 
 Exposed
 -------
@@ -41,7 +40,7 @@ _EPSILON = 1e-12
 # ═══════════════════════════════════════════════════════════════════════════
 
 def pearson_corr(a: pd.Series, b: pd.Series) -> float:
-    """Pearson correlation between two aligned return series.
+    """Return Pearson correlation between aligned return series.
 
     Returns ``nan`` if either series has variance below numerical zero.
     """
@@ -58,15 +57,14 @@ def pearson_corr(a: pd.Series, b: pd.Series) -> float:
 
 
 def _normal_two_sided_p(z: float) -> float:
-    """Two-sided p-value from a standard-normal z-score, using ``math.erf``."""
+    """Return the two-sided normal p-value for a z-score."""
     if math.isnan(z) or math.isinf(z):
         return float("nan")
     return float(math.erfc(abs(z) / math.sqrt(2.0)))
 
 
 def _sample_sharpe(returns: pd.Series) -> float:
-    """Per-period Sharpe (mean / std with ddof=1).  Annualisation is the
-    caller's responsibility."""
+    """Return per-period Sharpe; callers handle annualisation."""
     r = returns.dropna()
     if len(r) < 2:
         return float("nan")
@@ -85,7 +83,7 @@ def jobson_korkie_memmel(
     returns_b: pd.Series,
     ann_factor: float = 52.0,
 ) -> Dict[str, float]:
-    """Memmel-corrected Jobson–Korkie test on the Sharpe-ratio difference.
+    """Run the Memmel-corrected Jobson-Korkie Sharpe difference test.
 
     Returns
     -------
@@ -138,10 +136,9 @@ def jobson_korkie_memmel(
         + 0.5 * (sr_a_pp ** 2 + sr_b_pp ** 2 - 2.0 * sr_a_pp * sr_b_pp * rho ** 2)
     )
     if var_diff <= _EPSILON:
-        # Degenerate variance — happens when the two series are identical
-        # (or perfectly correlated with equal Sharpe).  If the Sharpe
-        # difference is also numerically zero, the test trivially does not
-        # reject equality (z=0, p=1).  Otherwise the statistic is undefined.
+        # Identical or perfectly matched series make the variance degenerate.
+        # Equal Sharpe values imply no rejection; otherwise the statistic is
+        # undefined.
         if abs(sr_a_pp - sr_b_pp) <= _EPSILON:
             z = 0.0
             p = 1.0
@@ -175,7 +172,7 @@ def bootstrap_ci(
     ci: float = 0.95,
     seed: Optional[int] = None,
 ) -> Dict[str, float]:
-    """Non-parametric percentile bootstrap confidence interval.
+    """Return a non-parametric percentile bootstrap confidence interval.
 
     Parameters
     ----------
@@ -255,7 +252,7 @@ def paired_returns_test(
     returns_a: pd.Series,
     returns_b: pd.Series,
 ) -> Dict[str, float]:
-    """Two-sided paired t-test on the per-period return difference.
+    """Run a two-sided paired t-test on per-period return differences.
 
     Tests H₀: mean(a − b) = 0.  Uses the standard t-statistic with n − 1
     degrees of freedom.  The p-value is computed from
@@ -280,8 +277,8 @@ def paired_returns_test(
     mean_d = float(diff.mean())
     std_d = float(diff.std(ddof=1))
     if std_d < _EPSILON:
-        # Either identical or constantly-offset series.  Mean tells the story;
-        # variance is zero so t is undefined.
+        # With zero variance in the paired difference, the mean determines
+        # whether equality is rejected.
         return {
             "mean_diff": mean_d, "std_diff": std_d,
             "t": float("nan"), "df": int(n - 1),
@@ -316,7 +313,7 @@ def compare_results(
     ci: float = 0.95,
     seed: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Run the full statistical comparison battery on two backtest results.
+    """Run all statistical comparisons on two backtest results.
 
     ``result_a`` and ``result_b`` are :class:`BacktestResult` objects.
     The function only reads ``portfolio_values`` and ``spec.name``, so it

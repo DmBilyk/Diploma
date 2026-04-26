@@ -1,8 +1,8 @@
 """
 app/ui/loading_window.py
 ========================
-Вікно завантаження, стилізоване під головне вікно програми.
-Показується замість splash screen під час первинного завантаження БД.
+Loading window styled to match the main application.
+Shown during initial database bootstrap instead of a splash screen.
 """
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -15,9 +15,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
 )
 
-_BG       = "#1A2332"   # фон — трохи темніший за sidebar
-_SIDEBAR  = "#1C2833"   # колір sidebar головного вікна
-_ACCENT   = "#1ABC9C"   # той самий акцент
+_BG       = "#1A2332"
+_SIDEBAR  = "#1C2833"
+_ACCENT   = "#1ABC9C"
 _TEXT     = "#ECF0F1"
 _SUBTEXT  = "#7F8C8D"
 _BORDER   = "#2E4057"
@@ -25,12 +25,10 @@ _BORDER   = "#2E4057"
 
 class LoadingWindow(QWidget):
     """
-    Окреме вікно завантаження.
-    Викликати: window.update_progress(percent, message)
-    Після завершення — вікно само закривається через close().
+    Standalone loading window updated by ``update_progress``.
+    The caller closes it once bootstrapping finishes.
     """
 
-    # Якщо захочете підписатися з main.py
     closed = Signal()
 
     def __init__(self) -> None:
@@ -43,13 +41,13 @@ class LoadingWindow(QWidget):
         self._build_ui()
         self._center_on_screen()
 
-        # Анімація крапок у заголовку ("Завантаження.", "..", "...")
+        # Animate dots in the title while the worker is running.
         self._dot_count = 0
         self._dot_timer = QTimer(self)
         self._dot_timer.timeout.connect(self._animate_dots)
         self._dot_timer.start(500)
 
-    # ── Побудова UI ────────────────────────────────────────────────────────
+    # ── UI construction ─────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
         self.setStyleSheet(f"""
@@ -64,7 +62,7 @@ class LoadingWindow(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── Шапка (стиль sidebar) ─────────────────────────────────────
+        # ── Header ────────────────────────────────────────────────────
         header = QWidget()
         header.setFixedHeight(72)
         header.setStyleSheet(f"background-color: {_SIDEBAR}; border-bottom: 1px solid {_BORDER};")
@@ -93,14 +91,13 @@ class LoadingWindow(QWidget):
 
         root.addWidget(header)
 
-        # ── Тіло ──────────────────────────────────────────────────────
+        # ── Body ──────────────────────────────────────────────────────
         body = QWidget()
         body.setStyleSheet(f"background-color: {_BG};")
         b_layout = QVBoxLayout(body)
         b_layout.setContentsMargins(36, 32, 36, 36)
         b_layout.setSpacing(0)
 
-        # Анімований заголовок
         self._main_label = QLabel("Ініціалізація бази даних")
         self._main_label.setStyleSheet(
             "font-size: 16px; font-weight: 700; color: #ECF0F1; letter-spacing: 0.5px;"
@@ -109,7 +106,6 @@ class LoadingWindow(QWidget):
 
         b_layout.addSpacing(8)
 
-        # Поточний крок
         self._step_label = QLabel("Підготовка до завантаження...")
         self._step_label.setStyleSheet(
             f"font-size: 11px; color: {_SUBTEXT}; min-height: 28px;"
@@ -119,7 +115,6 @@ class LoadingWindow(QWidget):
 
         b_layout.addSpacing(28)
 
-        # Прогрес-бар у стилі акценту
         self._bar = QProgressBar()
         self._bar.setRange(0, 100)
         self._bar.setValue(0)
@@ -140,7 +135,6 @@ class LoadingWindow(QWidget):
 
         b_layout.addSpacing(10)
 
-        # Відсоток
         self._pct_label = QLabel("0%")
         self._pct_label.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {_ACCENT};")
         self._pct_label.setAlignment(Qt.AlignRight)
@@ -148,7 +142,6 @@ class LoadingWindow(QWidget):
 
         b_layout.addStretch()
 
-        # Роздільник
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
         line.setStyleSheet(f"background-color: {_BORDER}; border: none;")
@@ -157,7 +150,6 @@ class LoadingWindow(QWidget):
 
         b_layout.addSpacing(14)
 
-        # Підказка
         hint = QLabel("Це відбувається лише при першому запуску. Надалі програма стартує миттєво.")
         hint.setStyleSheet(f"font-size: 10px; color: {_BORDER}; color: #3D566E;")
         hint.setWordWrap(True)
@@ -166,15 +158,15 @@ class LoadingWindow(QWidget):
 
         root.addWidget(body, 1)
 
-    # ── Публічний API ──────────────────────────────────────────────────────
+    # ── Public API ──────────────────────────────────────────────────────────
 
     def update_progress(self, percent: int, message: str) -> None:
-        """Викликається з DataLoaderWorker через сигнал."""
+        """Update progress from ``DataLoaderWorker`` signals."""
         self._bar.setValue(percent)
         self._pct_label.setText(f"{percent}%")
         self._step_label.setText(message)
 
-    # ── Службові методи ────────────────────────────────────────────────────
+    # ── Internal helpers ────────────────────────────────────────────────────
 
     def _animate_dots(self) -> None:
         self._dot_count = (self._dot_count + 1) % 4

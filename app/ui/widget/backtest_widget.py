@@ -2,26 +2,26 @@
 app/ui/widgets/backtest_widget.py
 =================================
 
-Інтерактивний бектест-дашборд для InvestPortfolio Optimizer.
-Підтримує порівняння КІЛЬКОХ алгоритмів одночасно:
+Interactive backtest dashboard for InvestPortfolio Optimizer.
+Supports comparing multiple algorithms in one run:
   • Hybrid Evo (GA + SLSQP)
   • Markowitz (Mean-Variance)
-  • Плагіни (BaseOptimizer)
-  • Ринковий бенчмарк (Equal-Weight)
+  • Plugins (BaseOptimizer)
+  • Market benchmark (Equal-Weight)
 
-Структура сторінки
-──────────────────
+Page structure
+──────────────
 ┌─────────────────────────────────────────────────────────────────────┐
-│  TopBar — «Comparison Backtest» + статус-badge                      │
+│  TopBar — "Comparison Backtest" + status badge                      │
 ├──────────────────┬──────────────────────────────────────────────────┤
 │  ControlPanel    │  ResultsStack                                     │
-│  (min 260 px)    │   ├─ EmptyState  (до запуску)                    │
-│  ─ Algorithms    │   ├─ SpinnerView (під час запуску)               │
-│  ─ Plugins       │   └─ ComparisonDashboard (після запуску)         │
-│  ─ Benchmark     │       ├─ MetricTable (рядки = алгоритми)         │
-│  ─ Dates         │       ├─ PortfolioValueChart (всі серії)         │
+│  (min 260 px)    │   ├─ EmptyState  (before run)                    │
+│  ─ Algorithms    │   ├─ SpinnerView (during run)                    │
+│  ─ Plugins       │   └─ ComparisonDashboard (after run)             │
+│  ─ Benchmark     │       ├─ MetricTable (rows = algorithms)         │
+│  ─ Dates         │       ├─ PortfolioValueChart (all series)        │
 │  ─ Parameters    │       ├─ DrawdownChart                           │
-│  ─ [Run btn]     │       └─ WeightsChart (для обраного алгоритму)   │
+│  ─ [Run btn]     │       └─ WeightsChart (selected algorithm)       │
 └──────────────────┴──────────────────────────────────────────────────┘
 """
 
@@ -101,7 +101,7 @@ _ORANGE = "#94A3B8"  # muted slate for benchmark line
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  MATPLOTLIB КАНВАС
+#  MATPLOTLIB CANVAS
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _ThemeAwareCanvas(FigureCanvas):
@@ -114,13 +114,12 @@ class _ThemeAwareCanvas(FigureCanvas):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TOGGLE CARD  — QFrame з нормальним layout (без paintEvent)
+#  TOGGLE CARD
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _ToggleCard(QFrame):
     """
-    Клікабельна картка-перемикач для вибору алгоритму.
-    QFrame + QHBoxLayout з QLabel — без жодного paintEvent.
+    Clickable card used to include or exclude an algorithm.
     """
     toggled = Signal(bool)
 
@@ -134,19 +133,17 @@ class _ToggleCard(QFrame):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("toggleCard")
-        self._title   = title  # plain string — read by _PluginSelector.selected_plugins()
+        self._title   = title  # Read by _PluginSelector.selected_plugins().
         self._color   = color
         self._checked = checked
         self.setCursor(Qt.PointingHandCursor)
         self.setMinimumHeight(54)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        # ── Layout ────────────────────────────────────────────────────────────
         row = QHBoxLayout(self)
         row.setContentsMargins(12, 8, 12, 8)
         row.setSpacing(8)
 
-        # Текстовий блок (назва + підзаголовок)
         text_col = QVBoxLayout()
         text_col.setSpacing(2)
         text_col.setContentsMargins(0, 0, 0, 0)
@@ -160,7 +157,6 @@ class _ToggleCard(QFrame):
         text_col.addWidget(self._sub_lbl)
         row.addLayout(text_col, 1)
 
-        # Галочка праворуч
         self._check_lbl = QLabel("✓")
         self._check_lbl.setFixedSize(18, 18)
         self._check_lbl.setAlignment(Qt.AlignCenter)
@@ -168,7 +164,7 @@ class _ToggleCard(QFrame):
 
         self._refresh_style()
 
-    # ── Стан ──────────────────────────────────────────────────────────────────
+    # ── State ────────────────────────────────────────────────────────────────
 
     def isChecked(self) -> bool:
         return self._checked
@@ -184,7 +180,7 @@ class _ToggleCard(QFrame):
             self.toggled.emit(self._checked)
         super().mousePressEvent(event)
 
-    # ── Стилі ─────────────────────────────────────────────────────────────────
+    # ── Styling ──────────────────────────────────────────────────────────────
 
     def _refresh_style(self) -> None:
         on  = self._checked
@@ -192,7 +188,7 @@ class _ToggleCard(QFrame):
         bg      = f"rgba({rgb}, 0.10)" if on else _SURFACE
         border  = self._color          if on else _BORDER
 
-        # Стиль рамки — через objectName щоб не лізти в дочірні віджети
+        # Scope frame styling through objectName so child widgets are not affected.
         self.setStyleSheet(f"""
             QFrame#toggleCard {{
                 background-color: {bg};
@@ -229,13 +225,13 @@ class _ToggleCard(QFrame):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  PLUGIN SELECTOR  — окремий блок для плагінів
+#  PLUGIN SELECTOR
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _PluginSelector(QWidget):
     """
-    Блок вибору плагіну: список плагінів як toggle-картки.
-    Якщо плагінів немає — показує плейсхолдер.
+    Plugin picker rendered as toggle cards.
+    Shows a placeholder when no plugins are available.
     """
 
     def __init__(self, plugin_names: list[str], color: str,
@@ -274,13 +270,13 @@ class _PluginSelector(QWidget):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ПАНЕЛЬ КОНТРОЛЮ  (ліва колонка)
+#  CONTROL PANEL
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _ControlPanel(QScrollArea):
     """
-    Ліва панель з вибором алгоритмів і параметрами.
-    Signal: run_requested(dict)  — словник з усіма параметрами запуску
+    Left-side panel for algorithm selection and run parameters.
+    Emits ``run_requested(dict)`` with all launch parameters.
     """
     run_requested = Signal(dict)
 
@@ -339,14 +335,13 @@ class _ControlPanel(QScrollArea):
         self.setWidgetResizable(True)
         self._build_inner()
 
-    # ── Побудова ─────────────────────────────────────────────────────────────
+    # ── Build ────────────────────────────────────────────────────────────────
 
     def _build_inner(self) -> None:
         lyt = QVBoxLayout(self._inner)
         lyt.setContentsMargins(12, 16, 12, 16)
         lyt.setSpacing(16)
 
-        # ── 1. Алгоритми ──────────────────────────────────────────────────
         lyt.addWidget(self._section_label("ALGORITHMS"))
 
         self._card_hybrid = _ToggleCard(
@@ -364,7 +359,6 @@ class _ControlPanel(QScrollArea):
         lyt.addWidget(self._card_hybrid)
         lyt.addWidget(self._card_markowitz)
 
-        # ── 2. Плагіни ────────────────────────────────────────────────────
         lyt.addWidget(self._section_label("PLUGINS"))
 
         try:
@@ -377,7 +371,6 @@ class _ControlPanel(QScrollArea):
         self._plugin_selector = _PluginSelector(plugin_names, _SERIES_COLORS[3])
         lyt.addWidget(self._plugin_selector)
 
-        # ── 3. Бенчмарк ───────────────────────────────────────────────────
         lyt.addWidget(self._section_label("BENCHMARK"))
 
         self._card_ew = _ToggleCard(
@@ -388,7 +381,6 @@ class _ControlPanel(QScrollArea):
         )
         lyt.addWidget(self._card_ew)
 
-        # ── 4. Діапазон дат ───────────────────────────────────────────────
         lyt.addWidget(self._section_label("DATE RANGE"))
 
         date_grid = QGridLayout()
@@ -413,7 +405,6 @@ class _ControlPanel(QScrollArea):
 
         lyt.addLayout(date_grid)
 
-        # ── 5. Параметри ─────────────────────────────────────────────────
         lyt.addWidget(self._section_label("PARAMETERS"))
 
         params_grid = QGridLayout()
@@ -446,7 +437,6 @@ class _ControlPanel(QScrollArea):
 
         lyt.addLayout(params_grid)
 
-        # ── 6. Кнопка Run ─────────────────────────────────────────────────
         lyt.addSpacing(4)
         self.btn_run = QPushButton("▶  Run Comparison")
         self.btn_run.setMinimumHeight(42)
@@ -473,7 +463,7 @@ class _ControlPanel(QScrollArea):
         lyt.addWidget(self.btn_run)
         lyt.addStretch()
 
-    # ── Слот ─────────────────────────────────────────────────────────────────
+    # ── Slot ─────────────────────────────────────────────────────────────────
 
     def _on_run(self) -> None:
         def qs(qd: QDate) -> str:
@@ -565,11 +555,11 @@ class _ControlPanel(QScrollArea):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ТАБЛИЦЯ МЕТРИК  (рядки = алгоритми)
+#  METRICS TABLE
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _MetricsTable(QTableWidget):
-    """Компактна таблиця порівняння метрик усіх алгоритмів."""
+    """Compact table comparing metrics across all algorithms."""
 
     _COLUMNS = ["Algorithm", "Start ($)", "End ($)", "Return",
                 "CAGR", "Volatility", "Max Drawdown", "Sharpe", "Sortino",
@@ -587,7 +577,7 @@ class _MetricsTable(QTableWidget):
         self.verticalHeader().setVisible(False)
         self.horizontalHeader().setStretchLastSection(True)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        # Мінімальна висота замість фіксованої — масштабується разом з вікном
+        # Use a flexible height so the table scales with the window.
         self.setMinimumHeight(80)
         self.setMaximumHeight(200)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -647,7 +637,7 @@ class _MetricsTable(QTableWidget):
                     font.setBold(True)
                     item.setFont(font)
                 self.setItem(row_idx, col_idx, item)
-        # Підганяємо висоту таблиці під кількість рядків
+        # Fit table height to the current number of rows.
         row_h = self.rowHeight(0) if rows else 28
         header_h = self.horizontalHeader().height()
         needed = header_h + row_h * len(rows) + 4
@@ -655,11 +645,11 @@ class _MetricsTable(QTableWidget):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ПОРІВНЯЛЬНИЙ ДАШБОРД
+#  COMPARISON DASHBOARD
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _ComparisonDashboard(QWidget):
-    """Рендерить таблицю метрик + три matplotlib-графіки для N алгоритмів."""
+    """Render metric table and comparison charts for all series."""
 
     _selected_algo_idx: int = 0
 
@@ -674,35 +664,28 @@ class _ComparisonDashboard(QWidget):
         root.setContentsMargins(16, 12, 16, 12)
         root.setSpacing(10)
 
-        # Таблиця
         self._table = _MetricsTable()
         root.addWidget(self._table)
 
-        # Верхній графік — вартість
         self._fig_main = Figure(dpi=100)
         self._canvas_main = _ThemeAwareCanvas(self._fig_main)
         self._canvas_main.setMinimumHeight(180)
         root.addWidget(self._canvas_main, 4)
 
-        # ── Нижній рядок: Drawdown (ліво) + Weights (право) ──────────────────
         bottom_row = QHBoxLayout()
         bottom_row.setSpacing(10)
 
-        # Лівий блок — Drawdown
         self._fig_dd = Figure(dpi=100)
         self._canvas_dd = _ThemeAwareCanvas(self._fig_dd)
         self._canvas_dd.setMinimumHeight(150)
         bottom_row.addWidget(self._canvas_dd, 1)
 
-        # Правий блок — заголовок з selector + canvas weights
-        # Структура: QWidget > QVBoxLayout > [header_row, canvas]
         right_container = QWidget()
         right_container.setStyleSheet(f"background: {_BG};")
         right_vbox = QVBoxLayout(right_container)
         right_vbox.setContentsMargins(0, 0, 0, 0)
         right_vbox.setSpacing(4)
 
-        # Рядок заголовку: "Weights:" label + combobox
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
         header_row.setSpacing(6)
@@ -732,7 +715,6 @@ class _ComparisonDashboard(QWidget):
 
         right_vbox.addLayout(header_row)
 
-        # Canvas weights — займає весь простір що залишився
         self._fig_w = Figure(dpi=100)
         self._canvas_w = _ThemeAwareCanvas(self._fig_w)
         self._canvas_w.setMinimumHeight(130)
@@ -741,7 +723,7 @@ class _ComparisonDashboard(QWidget):
         bottom_row.addWidget(right_container, 1)
         root.addLayout(bottom_row, 3)
 
-    # ── Публічний API ─────────────────────────────────────────────────────────
+    # ── Public API ───────────────────────────────────────────────────────────
 
     def render(self, series_list: list[dict]) -> None:
         self._series = series_list
@@ -798,7 +780,7 @@ class _ComparisonDashboard(QWidget):
         self._draw_drawdown()
         self._draw_weights(self._get_selected_weights_series())
 
-    # ── Слоти ─────────────────────────────────────────────────────────────────
+    # ── Slots ────────────────────────────────────────────────────────────────
 
     def _on_weights_algo_changed(self, idx: int) -> None:
         self._selected_algo_idx = idx
@@ -811,7 +793,7 @@ class _ComparisonDashboard(QWidget):
                 return s
         return None
 
-    # ── Графік 1: Вартість ────────────────────────────────────────────────────
+    # ── Equity chart ─────────────────────────────────────────────────────────
 
     def _get_theme_colors(self):
         return _TEXT_PRI, _BORDER, _BG
@@ -853,7 +835,7 @@ class _ComparisonDashboard(QWidget):
             fig.subplots_adjust(left=0.10, right=0.88, top=0.90, bottom=0.12)
         self._canvas_main.draw()
 
-    # ── Графік 2: Просадка ────────────────────────────────────────────────────
+    # ── Drawdown chart ───────────────────────────────────────────────────────
 
     def _draw_drawdown(self) -> None:
         text_color, grid_color, bg_color = self._get_theme_colors()
@@ -888,7 +870,7 @@ class _ComparisonDashboard(QWidget):
             fig.subplots_adjust(left=0.12, right=0.97, top=0.88, bottom=0.14)
         self._canvas_dd.draw()
 
-    # ── Графік 3: Ваги ────────────────────────────────────────────────────────
+    # ── Weights chart ────────────────────────────────────────────────────────
 
     def _draw_weights(self, series: dict | None) -> None:
         text_color, grid_color, bg_color = self._get_theme_colors()
@@ -924,7 +906,7 @@ class _ComparisonDashboard(QWidget):
                     va="center", ha="left", fontsize=7.5, color=text_color)
 
         ax.invert_yaxis()
-        # Заголовок прибрано — він тепер у header_row зверху (QLabel + QComboBox)
+        # The title lives in the header row above this canvas.
         ax.xaxis.set_major_formatter(lambda x, _: f"{x:.0f}%")
         ax.tick_params(axis="y", labelsize=7.5)
         ax.spines["top"].set_visible(False)
@@ -1002,12 +984,12 @@ class _SpinnerView(QWidget):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ФОНОВИЙ МУЛЬТИ-WORKER
+#  BACKGROUND MULTI-WORKER
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _MultiBacktestWorker(QThread):
     """
-    Запускає N алгоритмів послідовно, емітує серіалізований список серій.
+    Run selected algorithms sequentially and emit chart-ready series data.
     Signals:
         progress_updated(int, str)
         finished(list[dict])
@@ -1022,7 +1004,7 @@ class _MultiBacktestWorker(QThread):
         super().__init__(parent)
         self._core   = core
         self._params = params
-        # Phase 7: keep the full BacktestReport so the UI can export it.
+        # Keep the full BacktestReport so export buttons can write it later.
         self.report = None
 
     def run(self) -> None:
@@ -1105,9 +1087,8 @@ class _MultiBacktestWorker(QThread):
         )
 
         def _metrics_to_dict(m) -> dict:
-            # Phase 1 fields are exposed alongside the legacy ones.  Defaults
-            # via getattr keep this safe if an older BacktestMetrics ever
-            # flows through (e.g. a deserialised report from a prior build).
+            # getattr keeps this safe for reports created before extended
+            # metrics existed.
             return dict(
                 total_return=m.total_return,
                 cagr=m.cagr,
@@ -1136,12 +1117,11 @@ class _MultiBacktestWorker(QThread):
             opt = HybridEvoOptimizer(
                 pop_size=pop_size, n_generations=n_gen,
                 max_cardinality=max_k, risk_free_rate=rfr, seed=42,
-                mu_shrinkage=True,            # James-Stein на μ — ↓ оцінкового шуму
-                penalty_concentration=0.1,    # м'який anti-Herfindahl
+                mu_shrinkage=True,            # Reduce expected-return estimation noise.
+                penalty_concentration=0.1,    # Soft anti-concentration penalty.
             )
-            # ВАЖЛИВО: передаємо start_date, інакше Hybrid Evo тренується на
-            # всій історії БД (~30 років), а Markowitz — лише на [train_start,
-            # train_end].  Це робило порівняння нечесним.
+            # Use the same training window as Markowitz to avoid look-ahead
+            # and keep the comparison fair.
             res = opt.run(
                 tickers=valid_tickers,
                 start_date=train_start,
@@ -1172,7 +1152,7 @@ class _MultiBacktestWorker(QThread):
             specs.append(PortfolioSpec(name="Markowitz", weights=w_m))
             spec_meta.append(dict(color=color, is_benchmark=False, weights=w_m))
 
-        # ── Плагіни ─────────────────────────────────────────────────────────
+        # ── Plugins ─────────────────────────────────────────────────────────
         for pa in [a for a in algorithms if a.startswith("plugin:")]:
             plugin_name = pa.removeprefix("plugin:")
             color = _SERIES_COLORS[len(specs) % len(_SERIES_COLORS)]
@@ -1209,7 +1189,7 @@ class _MultiBacktestWorker(QThread):
 
         self.progress_updated.emit(92, "Simulating backtest with rebalancing...")
         report = engine.run(specs)
-        # Phase 7: expose the full report so BacktestWidget can export it.
+        # Expose the full report so BacktestWidget can export it.
         self.report = report
 
         series_list: list[dict] = []
@@ -1228,11 +1208,11 @@ class _MultiBacktestWorker(QThread):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ГОЛОВНИЙ COMPARISON BACKTEST WIDGET
+#  MAIN COMPARISON BACKTEST WIDGET
 # ══════════════════════════════════════════════════════════════════════════════
 
 class BacktestWidget(QWidget):
-    """Сторінка «Comparison Backtest» — порівняння кількох алгоритмів."""
+    """Comparison Backtest page for multiple algorithms."""
 
     _IDX_EMPTY   = 0
     _IDX_SPINNER = 1
@@ -1243,7 +1223,7 @@ class BacktestWidget(QWidget):
         self.setStyleSheet(f"background-color: {_BG};")
         self._core   = core
         self._worker: _MultiBacktestWorker | None = None
-        # Phase 7: latest BacktestReport for export
+        # Latest BacktestReport available for export.
         self._last_report = None
         self._build_ui()
 
@@ -1292,7 +1272,7 @@ class BacktestWidget(QWidget):
         lyt.addWidget(title)
         lyt.addStretch()
 
-        # ── Phase 7: export buttons (disabled until a report exists) ──
+        # Export buttons stay disabled until a report exists.
         export_btn_style = (
             f"QPushButton {{"
             f"  color: {_TEXT_PRI};"
@@ -1363,7 +1343,7 @@ class BacktestWidget(QWidget):
         f.setStyleSheet(f"background: {_BORDER}; border: none;")
         return f
 
-    # ── Слоти ─────────────────────────────────────────────────────────────────
+    # ── Slots ────────────────────────────────────────────────────────────────
 
     def _on_run_requested(self, params: dict) -> None:
         if self._worker and self._worker.isRunning():
@@ -1391,7 +1371,7 @@ class BacktestWidget(QWidget):
     def _on_finished(self, series_list: list) -> None:
         self._spinner_view.stop()
         self._ctrl.btn_run.setEnabled(True)
-        # Phase 7: capture the full BacktestReport for export.
+        # Capture the full BacktestReport for export.
         self._last_report = getattr(self._worker, "report", None)
         has_export = self._last_report is not None and bool(series_list)
         self._btn_export_json.setEnabled(has_export)
@@ -1415,7 +1395,7 @@ class BacktestWidget(QWidget):
         QMessageBox.critical(self, "Backtest Error",
                              f"The comparison run failed:\n\n{msg}")
 
-    # ── Phase 7: export slots ────────────────────────────────────────────────
+    # ── Export slots ─────────────────────────────────────────────────────────
 
     def _on_export_json(self) -> None:
         if self._last_report is None:
