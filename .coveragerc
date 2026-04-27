@@ -1,0 +1,8 @@
+[run]
+omit =
+    config-*.py
+    app/ui/*
+    app/main.py
+
+[report]
+ignore_errors = True
