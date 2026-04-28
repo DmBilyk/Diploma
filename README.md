@@ -3,6 +3,7 @@
 A desktop application for automated portfolio optimisation using evolutionary algorithms, Reinforcement Learning (PPO), and classical mean-variance methods. Designed for academic research and demonstration, it enables users to construct optimal investment portfolios under cardinality constraints, backtest strategies, and visualize results through a modern PySide6 GUI.
 
 ---
+![App Screenshot](docs/screenshot.png)
 
 ## Features
 
@@ -36,7 +37,6 @@ A desktop application for automated portfolio optimisation using evolutionary al
 
 ```
 Diploma/
-├── CLAUDE.md                # Project technical specification
 ├── README.md                # This file
 ├── requirements.txt         # Python dependencies (see below)
 ├── documentation.txt        # Auto-generated API docs
@@ -157,6 +157,3 @@ python app/train_ppo.py --mode direct
 
 ---
 
-## License
-
-© 2026. Academic/research use only. See `CLAUDE.md` for full details.
