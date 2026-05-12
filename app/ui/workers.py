@@ -45,10 +45,10 @@ class BacktestWorker(QThread):
 
     def run(self):
         try:
-            self.progress_updated.emit(5, "Завантаження цінових даних...")
-            self.progress_updated.emit(20, "Ініціалізація популяції...")
+            self.progress_updated.emit(5, "Loading price data...")
+            self.progress_updated.emit(20, "Initializing population...")
             result, report = self._core.run_and_backtest(**self._params)
-            self.progress_updated.emit(100, "Готово!")
+            self.progress_updated.emit(100, "Done!")
             self.finished.emit(result, report)
         except Exception as exc:
             logger.exception("BacktestWorker failed")

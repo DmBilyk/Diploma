@@ -243,71 +243,7 @@ class PortfolioCore:
         return result
 
     # ══════════════════════════════════════════════════════════════════
-    #  3. AI / LSTM OPTIMISATION
-    # ══════════════════════════════════════════════════════════════════
-
-    def run_lstm_optimization(
-        self,
-        model_path: str,
-        tickers: Optional[List[str]] = None,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
-        seq_length: int = 52,
-        alpha: float = 0.5,
-        pop_size: int = 200,
-        n_generations: int = 200,
-        max_cardinality: int = 15,
-        risk_free_rate: float = 0.02,
-        n_elite: int = 5,
-        top_m_refine: int = 10,
-        seed: Optional[int] = None,
-    ) -> Tuple[OptimizationResult, Dict[str, float]]:
-        """Run LSTM-driven optimisation.
-
-        Loads the pre-trained model from *model_path*, predicts expected
-        returns, blends them with historical estimates, and feeds the
-        result into the evolutionary optimiser.
-
-        Parameters
-        ----------
-        model_path : str
-            Filesystem path to the saved ``PortfolioLSTMModel``.
-        alpha : float
-            Blending weight.  1.0 = pure LSTM,  0.0 = pure historical.
-
-        Returns
-        -------
-        (OptimizationResult, dict[str, float])
-            The optimisation result **and** the per-ticker blended μ vector.
-        """
-        # Deferred import — TensorFlow / Keras may not be installed in
-        # every environment, and the facade should remain importable.
-        from app.ai.lstm_model import PortfolioLSTMModel
-        from app.ai.predictor import run_lstm_optimization as _run
-
-        model = PortfolioLSTMModel.load(model_path)
-
-        result, mu_dict = _run(
-            model=model,
-            repo=self.repo,
-            tickers=tickers,
-            start_date=start_date,
-            end_date=end_date,
-            seq_length=seq_length,
-            alpha=alpha,
-            pop_size=pop_size,
-            n_generations=n_generations,
-            max_cardinality=max_cardinality,
-            risk_free_rate=risk_free_rate,
-            n_elite=n_elite,
-            top_m_refine=top_m_refine,
-            seed=seed,
-        )
-        logger.info("LSTM optimisation finished — Sharpe %.4f", result.sharpe_ratio)
-        return result, mu_dict
-
-    # ══════════════════════════════════════════════════════════════════
-    #  3.5 PPO / REINFORCEMENT LEARNING OPTIMISATION
+    #  3. PPO / REINFORCEMENT LEARNING OPTIMISATION
     # ══════════════════════════════════════════════════════════════════
 
     def train_ppo(
@@ -672,10 +608,8 @@ class PortfolioCore:
         max_cardinality: int = 15,
         risk_free_rate: float = 0.02,
         seed: Optional[int] = None,
-        # LSTM-specific
+        # PPO-specific
         model_path: Optional[str] = None,
-        alpha: float = 0.5,
-        seq_length: int = 52,
         # Plugin-specific
         plugin_name: Optional[str] = None,
         plugin_config: Optional[Dict[str, Any]] = None,
@@ -694,7 +628,7 @@ class PortfolioCore:
 
         This compound method executes the full beta-testing pipeline:
 
-        1. **Optimise** using the chosen *method* (``"evo"``, ``"lstm"``,
+        1. **Optimise** using the chosen *method* (``"evo"``, ``"ppo"``,
            or ``"plugin"``) over ``[start_date, train_end]``.
         2. **Backtest** the resulting portfolio over ``[backtest_start, backtest_end]``
            (a **non-overlapping** window to avoid look-ahead bias).
@@ -702,7 +636,7 @@ class PortfolioCore:
 
         Parameters
         ----------
-        method : ``"evo"`` | ``"lstm"`` | ``"plugin"``
+        method : ``"evo"`` | ``"ppo"`` | ``"plugin"``
             Which optimisation back-end to use.
         train_end : str | None
             End of the training/optimisation window.  When provided,
@@ -761,31 +695,12 @@ class PortfolioCore:
             )
 
         # ── 1. Optimisation ──────────────────────────────────────────
-        mu_dict: Optional[Dict[str, float]] = None
-
         if method == "evo":
             result = self.run_optimization(
                 tickers=tickers,
                 start_date=start_date,
                 end_date=opt_end,
                 frequency=frequency,
-                pop_size=pop_size,
-                n_generations=n_generations,
-                max_cardinality=max_cardinality,
-                risk_free_rate=risk_free_rate,
-                seed=seed,
-            )
-
-        elif method == "lstm":
-            if model_path is None:
-                raise ValueError("model_path is required for method='lstm'")
-            result, mu_dict = self.run_lstm_optimization(
-                model_path=model_path,
-                tickers=tickers,
-                start_date=start_date,
-                end_date=opt_end,
-                seq_length=seq_length,
-                alpha=alpha,
                 pop_size=pop_size,
                 n_generations=n_generations,
                 max_cardinality=max_cardinality,
@@ -837,7 +752,7 @@ class PortfolioCore:
 
             raise ValueError(
 
-                f"Unknown method '{method}'. Choose from: 'evo', 'lstm', 'ppo', 'plugin'."
+                f"Unknown method '{method}'. Choose from: 'evo', 'ppo', 'plugin'."
 
             )
 
@@ -877,9 +792,6 @@ class PortfolioCore:
                     "sharpe_ratio": bt_m.sharpe_ratio,
                     "sortino_ratio": bt_m.sortino_ratio,
                 }
-            if mu_dict is not None:
-                metrics_to_save["mu_dict"] = mu_dict
-
             params_to_save: Dict[str, Any] = {
                 "method": method,
                 "tickers": tickers,

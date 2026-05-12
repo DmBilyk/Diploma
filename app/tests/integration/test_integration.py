@@ -3,7 +3,7 @@ test_integration.py — end-to-end integration tests for the main scenarios.
 
 These tests exercise multiple subsystems together (repository ↔ optimiser ↔
 backtester ↔ plugins ↔ facade) using a temporary SQLite database seeded with
-synthetic price data. They avoid heavy dependencies (PPO / LSTM / Yahoo
+synthetic price data. They avoid heavy dependencies (PPO / Yahoo
 Finance) and run fast.
 
 Scenarios covered:

@@ -89,7 +89,7 @@ class _ControlPanel(QScrollArea):
         super().__init__(parent)
         self._core = core
         self.setMinimumWidth(260)
-        self.setMaximumWidth(320)
+        self.setMaximumWidth(360)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setFrameShape(QFrame.NoFrame)
@@ -625,6 +625,7 @@ class _EmptyState(QWidget):
 
         subtitle = QLabel("Configure parameters on the left and click Run Optimization")
         subtitle.setAlignment(Qt.AlignCenter)
+        subtitle.setWordWrap(True)
         subtitle.setStyleSheet(f"color: {_TEXT_SEC}; font-size: 12px; padding-top: 6px; background: transparent;")
 
         for w in (title, subtitle):

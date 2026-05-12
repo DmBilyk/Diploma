@@ -33,7 +33,7 @@ class LoadingWindow(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("InvestPortfolio Optimizer — Ініціалізація")
+        self.setWindowTitle("InvestPortfolio Optimizer — Initialization")
         self.setFixedSize(520, 360)
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, False)
@@ -98,7 +98,8 @@ class LoadingWindow(QWidget):
         b_layout.setContentsMargins(36, 32, 36, 36)
         b_layout.setSpacing(0)
 
-        self._main_label = QLabel("Ініціалізація бази даних")
+        self._main_label = QLabel("Initializing database")
+        self._main_label.setWordWrap(True)
         self._main_label.setStyleSheet(
             "font-size: 16px; font-weight: 700; color: #ECF0F1; letter-spacing: 0.5px;"
         )
@@ -106,7 +107,7 @@ class LoadingWindow(QWidget):
 
         b_layout.addSpacing(8)
 
-        self._step_label = QLabel("Підготовка до завантаження...")
+        self._step_label = QLabel("Preparing to download...")
         self._step_label.setStyleSheet(
             f"font-size: 11px; color: {_SUBTEXT}; min-height: 28px;"
         )
@@ -150,8 +151,8 @@ class LoadingWindow(QWidget):
 
         b_layout.addSpacing(14)
 
-        hint = QLabel("Це відбувається лише при першому запуску. Надалі програма стартує миттєво.")
-        hint.setStyleSheet(f"font-size: 10px; color: {_BORDER}; color: #3D566E;")
+        hint = QLabel("This only happens on first launch. Subsequent starts are instant.")
+        hint.setStyleSheet("font-size: 10px; color: #3D566E;")
         hint.setWordWrap(True)
         hint.setAlignment(Qt.AlignCenter)
         b_layout.addWidget(hint)
@@ -171,7 +172,7 @@ class LoadingWindow(QWidget):
     def _animate_dots(self) -> None:
         self._dot_count = (self._dot_count + 1) % 4
         dots = "." * self._dot_count
-        self._main_label.setText(f"Ініціалізація бази даних{dots}")
+        self._main_label.setText(f"Initializing database{dots}")
 
     def _center_on_screen(self) -> None:
         from PySide6.QtGui import QGuiApplication

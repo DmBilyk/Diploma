@@ -465,7 +465,9 @@ class EvoOperators:
         """Initialise the population with random and return-aware candidates."""
         population = []
 
-        if mu is not None:
+        # Seeding needs at least two slots so the random subset has a non-empty
+        # range; with K=1 we fall back to fully random initialisation below.
+        if mu is not None and self.K >= 2:
             # Seed about 20% of the population with high-scoring assets.
             n_seeded = max(1, pop_size // 5)
             # Rank by a Sharpe-like proxy when covariance is available;
@@ -477,11 +479,15 @@ class EvoOperators:
                 sharpe_proxy = mu
             top_idx = np.argsort(sharpe_proxy)[::-1]
 
+            # Limit the pool so seeds remain biased toward strong assets.
+            n_top = min(50, self.n)
+            # Cap the upper bound by what the pool can supply (size must be
+            # ≤ n_top since replace=False below).
+            k_high = min(self.K, 20, n_top)
+
             for i in range(n_seeded):
                 # Use a random subset of the best-ranked assets for diversity.
-                k = self.rng.integers(2, min(self.K, 20) + 1)
-                # Limit the pool so seeds remain biased toward strong assets.
-                n_top = min(50, self.n)
+                k = self.rng.integers(2, k_high + 1)
                 chosen = self.rng.choice(top_idx[:n_top], size=k, replace=False)
                 binary = np.zeros(self.n, dtype=np.float64)
                 binary[chosen] = 1.0
@@ -499,7 +505,10 @@ class EvoOperators:
     # ----- selection ------------------------------------------------------
     def tournament_select(self, population: List[Individual]) -> Individual:
         """Select one parent with tournament selection."""
-        idxs = self.rng.choice(len(population), size=self.tourn, replace=False)
+        # Clamp the tournament size so callers can use pop_size < tournament_size
+        # without triggering numpy's "size > population, replace=False" error.
+        size = min(self.tourn, len(population))
+        idxs = self.rng.choice(len(population), size=size, replace=False)
         best = max(idxs, key=lambda i: population[i].fitness)
         return population[best].copy()
 

@@ -284,7 +284,7 @@ class _ControlPanel(QScrollArea):
         super().__init__(parent)
         self._core = core
         self.setMinimumWidth(260)
-        self.setMaximumWidth(320)
+        self.setMaximumWidth(360)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setFrameShape(QFrame.NoFrame)
@@ -697,6 +697,7 @@ class _ComparisonDashboard(QWidget):
 
         self._weights_selector = QComboBox()
         self._weights_selector.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._weights_selector.setMinimumWidth(140)
         self._weights_selector.setMaximumHeight(26)
         self._weights_selector.setStyleSheet(f"""
             QComboBox {{
@@ -947,11 +948,13 @@ class _EmptyState(QWidget):
 
         subtitle = QLabel("Select algorithms on the left and click  Run Comparison")
         subtitle.setAlignment(Qt.AlignCenter)
+        subtitle.setWordWrap(True)
         subtitle.setStyleSheet(f"color: {_TEXT_SEC}; font-size: 12px; padding-top: 6px;"
                                f" background: transparent;")
 
         hint = QLabel("Supports:  Hybrid Evo  ·  Markowitz  ·  Plugins  ·  Equal-Weight Benchmark")
         hint.setAlignment(Qt.AlignCenter)
+        hint.setWordWrap(True)
         hint.setStyleSheet(f"color: {_BORDER2}; font-size: 10px; padding-top: 4px;"
                            f" background: transparent;")
 

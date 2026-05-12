@@ -16,7 +16,7 @@ tests focus on the facade's own responsibilities:
   - sync_market_data: progress callback invocation + DB writes
 
 All heavyweight subsystems (HybridEvoOptimizer, BacktestEngine,
-PortfolioRepository, PluginManager, DataEngine, init_db, LSTM predictor)
+PortfolioRepository, PluginManager, DataEngine, init_db)
 are patched — none of them actually run.
 """
 from __future__ import annotations
@@ -445,16 +445,6 @@ class TestRunAndBacktestMethodDispatch(unittest.TestCase):
                 train_end="2022-01-01",
             )
 
-    def test_lstm_requires_model_path(self):
-        with self.assertRaisesRegex(ValueError, r"model_path"):
-            self.core.run_and_backtest(
-                method="lstm",
-                start_date="2020-01-01",
-                end_date="2023-01-01",
-                train_end="2022-01-01",
-                # model_path missing
-            )
-
     def test_ppo_requires_model_path(self):
         with self.assertRaisesRegex(ValueError, r"model_path"):
             self.core.run_and_backtest(
@@ -711,7 +701,7 @@ class TestSyncMarketData(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  9. Deferred imports — LSTM / PPO paths must not break facade import
+#  9. Deferred imports — PPO paths must not break facade import
 # ═════════════════════════════════════════════════════════════════════════════
 class TestDeferredImports(unittest.TestCase):
     """The facade must remain importable even when heavy optional
