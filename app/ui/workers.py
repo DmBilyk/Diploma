@@ -5,9 +5,7 @@ from app.core.core import PortfolioCore
 logger = logging.getLogger(__name__)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # Market-data sync worker
-# ══════════════════════════════════════════════════════════════════════════════
 class DataSyncWorker(QThread):
     progress_updated = Signal(int, str)
     finished = Signal(dict)
@@ -30,9 +28,7 @@ class DataSyncWorker(QThread):
             self.error.emit(str(e))
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # Optimisation and backtest worker
-# ══════════════════════════════════════════════════════════════════════════════
 class BacktestWorker(QThread):
     progress_updated = Signal(int, str)
     finished = Signal(object, object)
@@ -56,16 +52,9 @@ class BacktestWorker(QThread):
 
 
 
-"""
-==================
-QThread worker for background database loading.
-The UI remains responsive while progress is delivered through Qt signals.
-"""
+# Database bootstrap worker
 class DataLoaderWorker(QThread):
-    """
-    Run ``ensure_database_populated`` outside the UI thread and forward
-    progress through Qt signals.
-    """
+    """Run ``ensure_database_populated`` off the UI thread and forward progress via Qt signals."""
 
     progress = Signal(int, str)
     finished = Signal(bool)

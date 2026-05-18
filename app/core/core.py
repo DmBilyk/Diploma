@@ -72,7 +72,7 @@ class PortfolioCore:
         self._plugin_manager: Optional[PluginManager] = None
         self._data_engine = None
 
-    # ── lazy properties ────────────────────────────────────────────────
+    # Lazy properties
 
     @property
     def repo(self) -> PortfolioRepository:

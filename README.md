@@ -146,15 +146,6 @@ python app/train_ppo.py --timesteps 50000
 | `--plot` | Зберегти графіки в `reports/` | — |
 | `--save` | Зберегти експеримент у БД | — |
 
-### Турнір алгоритмів (Markowitz vs Hybrid Evo)
-
-```bash
-python app/check_optimization.py
-```
-
-Створює `tournament_results.png` із порівняльними графіками.
-
----
 
 ## Тестування
 

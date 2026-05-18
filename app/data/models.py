@@ -8,34 +8,23 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship,
 
 logger = logging.getLogger(__name__)
 
-# --- Absolute database path ---
-# 1. Locate this file (app/data/models.py).
-CURRENT_FILE = Path(__file__).resolve()
-
-# 2. Resolve the project root (Diploma/).
-# app/data/models.py -> parent -> app/data -> parent -> app -> parent -> Diploma
-PROJECT_ROOT = CURRENT_FILE.parent.parent.parent
-
-# 3. Build the database directory and file path.
+# Project root resolved from app/data/models.py -> Diploma/
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DB_DIR = PROJECT_ROOT / "resources" / "db"
 DB_FILE = DB_DIR / "portfolio.db"
-
-# Create the directory on first run if it does not exist yet.
-os.makedirs(DB_DIR, exist_ok=True)
-
-# 4. SQLAlchemy connection URL.
+DB_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = f"sqlite:///{DB_FILE}"
 
 logger.debug("Using Database at: %s", DB_PATH)
 
-
-# -----------------------------
 
 class Base(DeclarativeBase):
     pass
 
 
 class Asset(Base):
+    """Tradable instrument identified by ticker."""
+
     __tablename__ = "assets"
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -48,6 +37,8 @@ class Asset(Base):
 
 
 class Quote(Base):
+    """Single OHLCV observation for an asset on a given date."""
+
     __tablename__ = "quotes"
 
     __table_args__ = (
@@ -69,6 +60,8 @@ class Quote(Base):
 
 
 class Experiment(Base):
+    """Persisted record of an optimisation/backtest run."""
+
     __tablename__ = "experiments"
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -84,6 +77,7 @@ _engine = None
 _Session = None
 
 def init_db():
+    """Initialise the engine and session factory on first call; idempotent."""
     global _engine, _Session
     if _engine is None:
         _engine = create_engine(

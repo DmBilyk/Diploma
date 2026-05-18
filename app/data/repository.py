@@ -7,6 +7,7 @@ from .models import Asset, Quote, Experiment, init_db
 
 class PortfolioRepository:
     def __init__(self):
+        """Bind a session factory from ``init_db()``."""
         self.Session = init_db()
 
     def add_asset(self, ticker: str, name: str = None, sector: str = None):
@@ -25,6 +26,7 @@ class PortfolioRepository:
             return result
 
     def get_all_tickers(self) -> list[str]:
+        """Return every ticker currently stored in the database."""
         with self.Session() as session:
             result = session.execute(select(Asset.ticker))
             return [row[0] for row in result.all()]

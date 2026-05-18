@@ -9,28 +9,26 @@ logger = logging.getLogger(__name__)
 
 
 class PluginManager:
-    """
-    Manager class responsible for discovering and loading optimization plugins.
-    """
+    """Discovers and loads ``BaseOptimizer`` subclasses from the plugins folder."""
 
     def __init__(self, plugins_dir: str = None):
-        """
-        Initializes the PluginManager.
+        """Initialise the manager.
 
-        Args:
-            plugins_dir (str, optional): The directory to scan for plugins.
-                                         Defaults to the directory of this file.
+        Parameters
+        ----------
+        plugins_dir : str, optional
+            Directory to scan. Defaults to the directory of this file.
         """
         self.plugins_dir = plugins_dir or os.path.dirname(os.path.abspath(__file__))
         self._cache: Dict[str, Type[BaseOptimizer]] | None = None
 
     def get_plugins(self) -> Dict[str, Type[BaseOptimizer]]:
-        """
-        Scans the plugins folder for .py files, imports them, and extracts classes
-        that inherit from BaseOptimizer.
+        """Scan the plugins folder and return discovered optimisers.
 
-        Returns:
-            Dict[str, Type[BaseOptimizer]]: A dictionary mapped as {"Algorithm name": Class}.
+        Returns
+        -------
+        Dict[str, Type[BaseOptimizer]]
+            Mapping ``{class_name: class}`` for every ``BaseOptimizer`` subclass.
         """
         if self._cache is not None:
             return self._cache
@@ -43,7 +41,6 @@ class PluginManager:
 
         for filename in os.listdir(self.plugins_dir):
             if filename.endswith(".py") and not filename.startswith("__"):
-                # Skip the core plugin system files
                 if filename in ("base_optimizer.py", "plugin_manager.py"):
                     continue
 
@@ -54,13 +51,10 @@ class PluginManager:
                     spec = importlib.util.spec_from_file_location(module_name, file_path)
                     if spec and spec.loader:
                         module = importlib.util.module_from_spec(spec)
-                        # Execute module in its own namespace
                         spec.loader.exec_module(module)
 
-                        # Inspect module for BaseOptimizer subclasses
                         for name, obj in inspect.getmembers(module, inspect.isclass):
-                            # issubclass() перевіряє весь MRO (а не лише прямих батьків),
-                            # порівнює реальні об'єкти класів, а не рядки імен.
+                            # issubclass walks the full MRO and compares class objects, not names.
                             if (
                                     issubclass(obj, BaseOptimizer)
                                     and obj is not BaseOptimizer

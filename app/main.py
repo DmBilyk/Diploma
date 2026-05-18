@@ -12,17 +12,18 @@ from app.data.repository import PortfolioRepository
 
 
 def main():
+    """Точка входу: bootstrap БД у фоні, потім запуск GUI."""
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
-    # ── 1. Показуємо вікно завантаження ───────────────────────────────────
+    # 1. Показуємо вікно завантаження
     loading = LoadingWindow()
     loading.show()
 
     # Тримаємо посилання, щоб GC не знищив вікно після on_finished
     main_window: list[MainWindow] = []
 
-    # ── 2. Колбеки воркера ────────────────────────────────────────────────
+    # 2. Колбеки воркера
 
     def on_progress(percent: int, message: str):
         loading.update_progress(percent, message)
@@ -71,7 +72,7 @@ def main():
         )
         app.quit()
 
-    # ── 3. Запускаємо воркер ──────────────────────────────────────────────
+    # 3. Запускаємо воркер
     worker = DataLoaderWorker()
     worker.progress.connect(on_progress)
     worker.finished.connect(on_finished)

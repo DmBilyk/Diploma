@@ -75,7 +75,7 @@ class BacktestMetrics:
     start_value: float
     end_value: float
 
-    # ── Extended metrics ──────────────────────────────────────────────
+    # Extended metrics
     # Defaults keep older constructors and saved reports loadable.
     # Benchmark-dependent metrics are filled only when benchmark values exist.
     calmar_ratio: float = float("nan")
@@ -119,7 +119,7 @@ class BacktestReport:
     end_date: str
     initial_capital: float
 
-    # ── Persistence / export ─────────────────────────────────────────
+    # Persistence / export
     # I/O functions live in app.backtesting.io so this dataclass stays small.
     # Imports are lazy to avoid circular dependencies.
 
@@ -149,7 +149,7 @@ class BacktestReport:
         from app.backtesting import io as _io
         _io.save_html(self, path)
 
-    # ── Statistical comparison ───────────────────────────────────────
+    # Statistical comparison
 
     def compare(
         self,
@@ -840,14 +840,14 @@ class BacktestEngine:
                 "They may not have data in the selected date range."
             )
 
-        # ── Buy-and-hold ─────────────────────────────────────────────
+        # Buy-and-hold
         if rebalance_every is None:
             capital_per_asset = w * initial_capital
             shares = capital_per_asset / safe_first
             values = (price_matrix * shares).sum(axis=1)
             return pd.Series(values, index=subset.index, name="portfolio_value")
 
-        # ── Periodic rebalancing ─────────────────────────────────────
+        # Periodic rebalancing
         values = np.empty(n_rows, dtype=np.float64)
         current_value = initial_capital
 
@@ -947,7 +947,7 @@ class BacktestEngine:
 
         drawdown = float(((values / values.cummax()) - 1.0).min())
 
-        # ── Extended metrics delegated to app.backtesting.metrics ─────
+        # Extended metrics delegated to app.backtesting.metrics
         calmar = _metrics.calmar_ratio(cagr_val, drawdown)
         var95 = _metrics.historical_var(returns, level=0.95)
         cvar95 = _metrics.historical_cvar(returns, level=0.95)
